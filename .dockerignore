@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+data/
+.streamlit/secrets.toml
+.env
+*.sqlite
+README.md
+plan.md
+design.md
+tasks.md
