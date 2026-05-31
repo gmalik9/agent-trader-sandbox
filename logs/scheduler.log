@@ -1,18 +1,75 @@
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 245, in <module>
-    main()
-    ~~~~^^
-  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 241, in main
-    SchedulerRunner().run()
-    ~~~~~~~~~~~~~~~~~~~~~^^
-  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 221, in run
-    self.setup()
-    ~~~~~~~~~~^^
-  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 93, in setup
-    self.broker = build_broker(self.conn, long_term_client=self.long_term)
-                  ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/brokers/factory.py", line 37, in build_broker
-    raise RuntimeError("dual backend requires a LongTermClient")
-RuntimeError: dual backend requires a LongTermClient
+2026-05-31 02:37:04,595 WARNING __main__ no LLM provider configured (GITHUB_TOKEN not set); LLM-driven ticks will error
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-05-31 02:37:04,597 INFO __main__ scheduler starting (broker=sandbox)
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Added job "SchedulerRunner.job_mtm" to job store "default"
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Added job "SchedulerRunner.job_day_tick" to job store "default"
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Added job "SchedulerRunner.job_long_tick" to job store "default"
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Added job "SchedulerRunner.job_coord_tick" to job store "default"
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Added job "SchedulerRunner.job_tick_poll" to job store "default"
+2026-05-31 02:37:04,597 INFO apscheduler.scheduler Scheduler started
+2026-05-31 02:37:09,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:09 CDT)" (scheduled at 2026-05-31 02:37:09.597247-05:00)
+2026-05-31 02:37:09,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:14 CDT)" executed successfully
+2026-05-31 02:37:14,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:19 CDT)" (scheduled at 2026-05-31 02:37:14.597247-05:00)
+2026-05-31 02:37:14,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:19 CDT)" executed successfully
+2026-05-31 02:37:19,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:24 CDT)" (scheduled at 2026-05-31 02:37:19.597247-05:00)
+2026-05-31 02:37:19,605 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:24 CDT)" executed successfully
+2026-05-31 02:37:24,605 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:29 CDT)" (scheduled at 2026-05-31 02:37:24.597247-05:00)
+2026-05-31 02:37:24,605 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:29 CDT)" executed successfully
+2026-05-31 02:37:29,604 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:34 CDT)" (scheduled at 2026-05-31 02:37:29.597247-05:00)
+2026-05-31 02:37:29,605 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:34 CDT)" executed successfully
+2026-05-31 02:37:34,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:39 CDT)" (scheduled at 2026-05-31 02:37:34.597247-05:00)
+2026-05-31 02:37:34,602 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:39 CDT)" executed successfully
+2026-05-31 02:37:39,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:44 CDT)" (scheduled at 2026-05-31 02:37:39.597247-05:00)
+2026-05-31 02:37:39,604 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:44 CDT)" executed successfully
+2026-05-31 02:37:44,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:49 CDT)" (scheduled at 2026-05-31 02:37:44.597247-05:00)
+2026-05-31 02:37:44,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:49 CDT)" executed successfully
+2026-05-31 02:37:49,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:54 CDT)" (scheduled at 2026-05-31 02:37:49.597247-05:00)
+2026-05-31 02:37:49,604 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:54 CDT)" executed successfully
+2026-05-31 02:37:54,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:59 CDT)" (scheduled at 2026-05-31 02:37:54.597247-05:00)
+2026-05-31 02:37:54,602 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:37:59 CDT)" executed successfully
+2026-05-31 02:37:59,607 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:04 CDT)" (scheduled at 2026-05-31 02:37:59.597247-05:00)
+2026-05-31 02:37:59,609 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:04 CDT)" executed successfully
+2026-05-31 02:38:04,607 INFO apscheduler.executors.default Running job "SchedulerRunner.job_mtm (trigger: interval[0:01:00], next run at: 2026-05-31 02:39:04 CDT)" (scheduled at 2026-05-31 02:38:04.596931-05:00)
+2026-05-31 02:38:04,607 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:09 CDT)" (scheduled at 2026-05-31 02:38:04.597247-05:00)
+2026-05-31 02:38:04,627 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:09 CDT)" executed successfully
+2026-05-31 02:38:04,730 INFO apscheduler.executors.default Job "SchedulerRunner.job_mtm (trigger: interval[0:01:00], next run at: 2026-05-31 02:39:04 CDT)" executed successfully
+2026-05-31 02:38:09,605 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:14 CDT)" (scheduled at 2026-05-31 02:38:09.597247-05:00)
+2026-05-31 02:38:09,606 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:14 CDT)" executed successfully
+2026-05-31 02:38:14,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:19 CDT)" (scheduled at 2026-05-31 02:38:14.597247-05:00)
+2026-05-31 02:38:14,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:19 CDT)" executed successfully
+2026-05-31 02:38:19,601 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:24 CDT)" (scheduled at 2026-05-31 02:38:19.597247-05:00)
+2026-05-31 02:38:19,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:24 CDT)" executed successfully
+2026-05-31 02:38:24,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:29 CDT)" (scheduled at 2026-05-31 02:38:24.597247-05:00)
+2026-05-31 02:38:24,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:29 CDT)" executed successfully
+2026-05-31 02:38:29,599 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:34 CDT)" (scheduled at 2026-05-31 02:38:29.597247-05:00)
+2026-05-31 02:38:29,600 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:34 CDT)" executed successfully
+2026-05-31 02:38:34,602 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:39 CDT)" (scheduled at 2026-05-31 02:38:34.597247-05:00)
+2026-05-31 02:38:34,603 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:39 CDT)" executed successfully
+2026-05-31 02:38:39,598 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:44 CDT)" (scheduled at 2026-05-31 02:38:39.597247-05:00)
+2026-05-31 02:38:39,599 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:44 CDT)" executed successfully
+2026-05-31 02:38:44,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:49 CDT)" (scheduled at 2026-05-31 02:38:44.597247-05:00)
+2026-05-31 02:38:44,604 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:49 CDT)" executed successfully
+2026-05-31 02:38:49,610 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:54 CDT)" (scheduled at 2026-05-31 02:38:49.597247-05:00)
+2026-05-31 02:38:49,614 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:54 CDT)" executed successfully
+2026-05-31 02:38:54,598 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:59 CDT)" (scheduled at 2026-05-31 02:38:54.597247-05:00)
+2026-05-31 02:38:54,599 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:38:59 CDT)" executed successfully
+2026-05-31 02:38:59,599 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:04 CDT)" (scheduled at 2026-05-31 02:38:59.597247-05:00)
+2026-05-31 02:38:59,600 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:04 CDT)" executed successfully
+2026-05-31 02:39:04,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_mtm (trigger: interval[0:01:00], next run at: 2026-05-31 02:40:04 CDT)" (scheduled at 2026-05-31 02:39:04.596931-05:00)
+2026-05-31 02:39:04,604 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:09 CDT)" (scheduled at 2026-05-31 02:39:04.597247-05:00)
+2026-05-31 02:39:04,614 INFO apscheduler.executors.default Job "SchedulerRunner.job_mtm (trigger: interval[0:01:00], next run at: 2026-05-31 02:40:04 CDT)" executed successfully
+2026-05-31 02:39:04,615 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:09 CDT)" executed successfully
+2026-05-31 02:39:09,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:14 CDT)" (scheduled at 2026-05-31 02:39:09.597247-05:00)
+2026-05-31 02:39:09,605 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:14 CDT)" executed successfully
+2026-05-31 02:39:14,598 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:19 CDT)" (scheduled at 2026-05-31 02:39:14.597247-05:00)
+2026-05-31 02:39:14,598 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:19 CDT)" executed successfully
+2026-05-31 02:39:19,599 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:24 CDT)" (scheduled at 2026-05-31 02:39:19.597247-05:00)
+2026-05-31 02:39:19,600 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:24 CDT)" executed successfully
+2026-05-31 02:39:24,607 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:29 CDT)" (scheduled at 2026-05-31 02:39:24.597247-05:00)
+2026-05-31 02:39:24,607 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:29 CDT)" executed successfully
+2026-05-31 02:39:29,603 INFO apscheduler.executors.default Running job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:34 CDT)" (scheduled at 2026-05-31 02:39:29.597247-05:00)
+2026-05-31 02:39:29,604 INFO apscheduler.executors.default Job "SchedulerRunner.job_tick_poll (trigger: interval[0:00:05], next run at: 2026-05-31 02:39:34 CDT)" executed successfully
