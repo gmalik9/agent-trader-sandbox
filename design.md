@@ -294,10 +294,12 @@ back the resolved status.
 `DualBroker(primary=SandboxBroker, secondary=AlpacaPaperBroker)` is the
 default when `BROKER_BACKEND=dual`. Contract:
 - `place_order(req)` mints a `dual_group_id` (UUID4), then submits to both
-  legs **in parallel** via a small `ThreadPoolExecutor`. Both legs write
+  legs **sequentially** (primary first, then secondary). Both legs write
   their own `orders` row stamped with the same `dual_group_id` and the
-  agent's `thesis`. Sub-account routing: a `day`-agent order goes to `day`
-  (sandbox) **and** `day_alpaca` (alpaca); same for `long`.
+  agent's `thesis`. Sequential (not parallel) because SQLite `Connection`
+  is not safe across threads; per-trade latency cost is negligible. Sub-
+  account routing: a `day`-agent order goes to `day` (sandbox) **and**
+  `day_alpaca` (alpaca); same for `long`.
 - If the **primary** raises, the call raises (the agent must see the failure).
   If only the **secondary** raises, the primary order stands and a
   `divergence` row is written (see below) — the secondary failure must not

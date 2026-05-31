@@ -30,8 +30,11 @@ SECRETS_PATH = REPO_ROOT / ".streamlit" / "secrets.toml"
 def _load_secrets_file() -> dict[str, str]:
     if not SECRETS_PATH.exists():
         return {}
-    with SECRETS_PATH.open("rb") as fh:
-        raw = tomllib.load(fh)
+    try:
+        with SECRETS_PATH.open("rb") as fh:
+            raw = tomllib.load(fh)
+    except Exception:  # noqa: BLE001 — a malformed secrets file must not crash boot
+        return {}
     return {str(k): str(v) for k, v in raw.items() if not isinstance(v, dict)}
 
 

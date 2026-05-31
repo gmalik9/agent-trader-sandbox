@@ -63,8 +63,8 @@ considered done.
             local `orders` with `status='routed_external'` and poll for
             `external_id` resolution.
 - [ ] 2.8  Write `src/brokers/dual_broker.py` — fan-out wrapper:
-            mints `dual_group_id`, submits to both legs in parallel via
-            `ThreadPoolExecutor`, routes sub-accounts (`day`→`day`+`day_alpaca`,
+            mints `dual_group_id`, submits to both legs sequentially
+            (primary first), routes sub-accounts (`day`→`day`+`day_alpaca`,
             `long`→`long`+`long_alpaca`), records `dual_divergence` rows on
             secondary failure or fill mismatch, never lets a secondary error
             roll back the primary.
