@@ -1,34 +1,244 @@
-"""Scheduler entrypoint — `python -m src.scheduler.runner`.
+"""Scheduler runner — long-running process that owns all writes.
 
-Phase 6 will populate this with APScheduler jobs. For Phase 1 it is a
-no-op loop so `docker compose up` and `bash run.sh` succeed.
+Jobs (UTC scheduling; market-hour gating is internal to each job):
+- `mtm`        every 1 min — mark-to-market both sub-accounts
+- `day_tick`   every 5 min — DayTraderAgent.run_once
+- `long_tick`  daily at 21:30 UTC (16:30 ET nominal)
+- `coord_tick` daily at 21:45 UTC; acts only on the first trading week of the month
+- `tick_poll`  every 5s — drains `tick_requests` from the Streamlit UI
+
+A `data/scheduler.lock` file prevents double-start. SIGINT/SIGTERM trigger
+a graceful shutdown.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import signal
-import time
+import sqlite3
+import threading
+from datetime import datetime, timezone
 
-log = logging.getLogger("scheduler")
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
+
+from src.agents.coordinator import Coordinator
+from src.agents.day_trader import DayTraderAgent
+from src.agents.long_term import LongTermAgent
+from src.brokers.factory import build_broker
+from src.config import DATA_DIR, db_path, get_settings
+from src.llm.factory import get_provider
+from src.mcp_clients.long_term import LongTermClient
+from src.mcp_clients.short_term import ShortTermClient
+from src.sandbox import db as dbm
+from src.sandbox.clock import is_market_open, now_utc
+
+log = logging.getLogger(__name__)
+LOCK_PATH = DATA_DIR / "scheduler.lock"
+
+
+class SchedulerRunner:
+    def __init__(self) -> None:
+        self.settings = get_settings()
+        self.conn: sqlite3.Connection | None = None
+        self.short_term: ShortTermClient | None = None
+        self.long_term: LongTermClient | None = None
+        self.broker = None
+        self.provider = None
+        self.scheduler = BlockingScheduler(
+            timezone="UTC", job_defaults={"coalesce": True, "max_instances": 1,
+                                            "misfire_grace_time": 60},
+        )
+        self._stop = threading.Event()
+
+    # ---------------- lifecycle ----------------
+
+    def _acquire_lock(self) -> None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if LOCK_PATH.exists():
+            try:
+                pid = int(LOCK_PATH.read_text().strip())
+            except (ValueError, OSError):
+                pid = 0
+            if pid and _pid_alive(pid):
+                raise RuntimeError(f"scheduler already running (pid {pid}); "
+                                    f"remove {LOCK_PATH} if stale")
+        LOCK_PATH.write_text(str(os.getpid()))
+
+    def _release_lock(self) -> None:
+        try:
+            if LOCK_PATH.exists() and LOCK_PATH.read_text().strip() == str(os.getpid()):
+                LOCK_PATH.unlink()
+        except OSError:
+            pass
+
+    def setup(self) -> None:
+        self.conn = dbm.get_conn(db_path())
+        dbm.migrate(self.conn)
+        dbm.bootstrap_accounts(self.conn,
+                                 capital_total=self.settings.capital_total,
+                                 split_day_pct=self.settings.split_day_pct)
+
+        if self.settings.short_term_trader_path:
+            self.short_term = ShortTermClient()
+            self.short_term.start()
+            log.info("short-term MCP client up")
+        if self.settings.stock_recommender_path:
+            self.long_term = LongTermClient()
+            self.long_term.start()
+            log.info("long-term MCP client up")
+
+        self.broker = build_broker(self.conn, long_term_client=self.long_term)
+
+        try:
+            self.provider = get_provider()
+            log.info("LLM provider: %s / %s", self.provider.name, self.provider.model)
+        except Exception as e:
+            log.warning("no LLM provider configured (%s); LLM-driven ticks will error", e)
+            self.provider = None
+
+    def teardown(self) -> None:
+        self._stop.set()
+        for c in (self.short_term, self.long_term):
+            if c is not None:
+                try:
+                    c.stop()
+                except Exception:
+                    log.exception("error stopping MCP client")
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self._release_lock()
+
+    # ---------------- agents ----------------
+
+    def _day_agent(self) -> DayTraderAgent:
+        return DayTraderAgent(self.conn, self.broker, self.short_term,
+                                provider=self.provider)
+
+    def _long_agent(self) -> LongTermAgent:
+        return LongTermAgent(self.conn, self.broker, self.long_term,
+                              provider=self.provider)
+
+    def _coordinator(self) -> Coordinator:
+        return Coordinator(self.conn, self.broker)
+
+    # ---------------- jobs ----------------
+
+    def job_mtm(self) -> None:
+        now = now_utc()
+        if not is_market_open(now):
+            return
+        try:
+            for sub in ("day", "long"):
+                self.broker.mark_to_market(now, sub_account=sub)
+        except Exception:
+            log.exception("mtm failed")
+
+    def job_day_tick(self) -> None:
+        if not is_market_open(now_utc()):
+            return
+        try:
+            self._day_agent().run_once()
+        except Exception:
+            log.exception("day_tick failed")
+
+    def job_long_tick(self) -> None:
+        try:
+            self._long_agent().run_once()
+        except Exception:
+            log.exception("long_tick failed")
+
+    def job_coord_tick(self) -> None:
+        # Gate on "first trading week of the month".
+        if now_utc().day > 7:
+            return
+        try:
+            self._coordinator().run_once()
+        except Exception:
+            log.exception("coord_tick failed")
+
+    def job_tick_poll(self) -> None:
+        try:
+            rows = self.conn.execute(
+                "SELECT id, agent FROM tick_requests WHERE consumed_at IS NULL "
+                "ORDER BY id LIMIT 20"
+            ).fetchall()
+        except Exception:
+            log.exception("tick_poll select failed")
+            return
+        for row in rows:
+            tid, agent = row["id"], row["agent"]
+            try:
+                if agent == "day":
+                    self._day_agent().run_once()
+                elif agent == "long":
+                    self._long_agent().run_once()
+                elif agent == "coordinator":
+                    self._coordinator().run_once()
+                elif agent == "mtm":
+                    self.job_mtm()
+                else:
+                    log.warning("tick_poll: unknown agent=%r", agent)
+            except Exception:
+                log.exception("tick %s (agent=%s) failed", tid, agent)
+            finally:
+                self.conn.execute(
+                    "UPDATE tick_requests SET consumed_at=? WHERE id=?",
+                    (now_utc().isoformat(), tid),
+                )
+
+    # ---------------- wiring ----------------
+
+    def register_jobs(self) -> None:
+        self.scheduler.add_job(self.job_mtm, IntervalTrigger(minutes=1), id="mtm")
+        self.scheduler.add_job(self.job_day_tick, IntervalTrigger(minutes=5), id="day_tick")
+        self.scheduler.add_job(self.job_long_tick,
+                                 CronTrigger(hour=21, minute=30), id="long_tick")
+        self.scheduler.add_job(self.job_coord_tick,
+                                 CronTrigger(hour=21, minute=45), id="coord_tick")
+        self.scheduler.add_job(self.job_tick_poll,
+                                 IntervalTrigger(seconds=5), id="tick_poll")
+
+    def install_signals(self) -> None:
+        def handler(signum, _frame):
+            log.info("signal %s received; shutting down", signum)
+            try:
+                self.scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            self._stop.set()
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+
+    def run(self) -> None:
+        self._acquire_lock()
+        try:
+            self.setup()
+            self.register_jobs()
+            self.install_signals()
+            log.info("scheduler starting (broker=%s)", self.settings.broker_backend)
+            self.scheduler.start()
+        finally:
+            self.teardown()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    log.info("scheduler scaffold up; no jobs registered yet (Phase 6 to come)")
-
-    stop = False
-
-    def _handle(signum, _frame):  # noqa: ANN001
-        nonlocal stop
-        log.info("received signal %s, exiting", signum)
-        stop = True
-
-    signal.signal(signal.SIGTERM, _handle)
-    signal.signal(signal.SIGINT, _handle)
-
-    while not stop:
-        time.sleep(1)
+    logging.basicConfig(level=logging.INFO,
+                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    SchedulerRunner().run()
 
 
 if __name__ == "__main__":
