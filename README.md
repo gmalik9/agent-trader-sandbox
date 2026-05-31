@@ -2,10 +2,20 @@
 
 An LLM-driven, paper-only agentic trader with a built-in sandbox.
 
+Live app: https://agent-trader.streamlit.app/
+Repo: https://github.com/gmalik9/agent-trader-sandbox
+
+### Companion projects
+
+| Project | Repo | Live app |
+|---|---|---|
+| Short-Term Trader (intraday signals MCP) | https://github.com/gmalik9/short-term-stock-recommender | https://short-term-stock.streamlit.app/ |
+| Long-Term Stock Recommender (Alpaca paper MCP) | https://github.com/gmalik9/long-term-stock-recommender | https://long-term-stock.streamlit.app/ |
+
 - **Day-Trader agent** consumes intraday signals from the sibling
-  [`short-term-trader`](../short-term-trader) project (via MCP).
+  [short-term-stock-recommender](https://github.com/gmalik9/short-term-stock-recommender) project (via MCP).
 - **Long-Term Investor agent** consumes recommendations from the sibling
-  [`stock-recommender`](../stock-recommender) project (via MCP).
+  [long-term-stock-recommender](https://github.com/gmalik9/long-term-stock-recommender) project (via MCP).
 - **Coordinator** splits a configurable bankroll between the two sub-accounts.
 - **DualBroker** (default) executes every order on the local sandbox **and**
   on Alpaca paper in parallel, so you can compare the agent's local PnL
