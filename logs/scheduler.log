@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 245, in <module>
+    main()
+    ~~~~^^
+  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 241, in main
+    SchedulerRunner().run()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 221, in run
+    self.setup()
+    ~~~~~~~~~~^^
+  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/scheduler/runner.py", line 93, in setup
+    self.broker = build_broker(self.conn, long_term_client=self.long_term)
+                  ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/girikmalik/Documents/girik_academic_resources/personal_projects/agentic-trader/src/brokers/factory.py", line 37, in build_broker
+    raise RuntimeError("dual backend requires a LongTermClient")
+RuntimeError: dual backend requires a LongTermClient
