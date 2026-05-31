@@ -25,6 +25,33 @@ st.set_page_config(page_title="Agentic Trader", layout="wide")
 
 
 @st.cache_resource
+def _start_background_scheduler():
+    """Boot APScheduler inside the Streamlit process.
+
+    On Streamlit Cloud (and any single-process deployment) there is no separate
+    scheduler. We start one here once per app instance. `@st.cache_resource`
+    guarantees a single instance across reruns.
+
+    Returns the runner so callers can introspect; failures are swallowed and
+    logged so the UI still renders even if the scheduler can't start
+    (e.g. missing secrets).
+    """
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    try:
+        from src.scheduler.runner import SchedulerRunner
+        runner = SchedulerRunner(background=True)
+        runner.start_background()
+        return runner
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).exception("background scheduler failed: %s", e)
+        return None
+
+
+_scheduler = _start_background_scheduler()
+
+
+@st.cache_resource
 def get_writable_conn() -> sqlite3.Connection:
     """Single connection used for the rare UI writes (tick requests, settings)."""
     conn = dbm.get_conn(db_path())
@@ -70,6 +97,7 @@ with hdr_r:
         st.error("KILL SWITCH ON")
     else:
         st.success("Kill switch OFF")
+    st.caption("Scheduler: in-app" if _scheduler else "Scheduler: external / not running")
 
 
 tabs = st.tabs(["Overview", "Day-Trader", "Long-Term", "History",

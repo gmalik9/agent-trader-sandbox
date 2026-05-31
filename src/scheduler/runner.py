@@ -20,6 +20,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -40,14 +41,16 @@ LOCK_PATH = DATA_DIR / "scheduler.lock"
 
 
 class SchedulerRunner:
-    def __init__(self) -> None:
+    def __init__(self, *, background: bool = False) -> None:
         self.settings = get_settings()
         self.conn: sqlite3.Connection | None = None
         self.short_term: ShortTermClient | None = None
         self.long_term: LongTermClient | None = None
         self.broker = None
         self.provider = None
-        self.scheduler = BlockingScheduler(
+        self.background = background
+        cls = BackgroundScheduler if background else BlockingScheduler
+        self.scheduler = cls(
             timezone="UTC", job_defaults={"coalesce": True, "max_instances": 1,
                                             "misfire_grace_time": 60},
         )
@@ -82,13 +85,23 @@ class SchedulerRunner:
                                  split_day_pct=self.settings.split_day_pct)
 
         if self.settings.short_term_trader_path:
-            self.short_term = ShortTermClient()
-            self.short_term.start()
-            log.info("short-term MCP client up")
+            try:
+                self.short_term = ShortTermClient()
+                self.short_term.start()
+                log.info("short-term MCP client up")
+            except Exception as e:
+                log.warning("short-term MCP client failed to start (%s); "
+                             "day-trader ticks will no-op", e)
+                self.short_term = None
         if self.settings.stock_recommender_path:
-            self.long_term = LongTermClient()
-            self.long_term.start()
-            log.info("long-term MCP client up")
+            try:
+                self.long_term = LongTermClient()
+                self.long_term.start()
+                log.info("long-term MCP client up")
+            except Exception as e:
+                log.warning("long-term MCP client failed to start (%s); "
+                             "long-term and Alpaca mirror will no-op", e)
+                self.long_term = None
 
         self.broker = build_broker(self.conn, long_term_client=self.long_term)
 
@@ -225,6 +238,18 @@ class SchedulerRunner:
             self.scheduler.start()
         finally:
             self.teardown()
+
+    def start_background(self) -> None:
+        """Start a non-blocking BackgroundScheduler (for Streamlit Cloud).
+
+        Skips the pid-file lock since the host process is Streamlit itself.
+        """
+        if not self.background:
+            raise RuntimeError("start_background requires background=True")
+        self.setup()
+        self.register_jobs()
+        self.scheduler.start()
+        log.info("background scheduler running (broker=%s)", self.settings.broker_backend)
 
 
 def _pid_alive(pid: int) -> bool:

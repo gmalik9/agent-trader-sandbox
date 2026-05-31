@@ -35,6 +35,17 @@ Or with Docker:
 docker compose up --build
 ```
 
+## Streamlit Cloud
+
+The app also runs on Streamlit Cloud as a single process: APScheduler is
+started in a background thread on first render so the agents tick without a
+separate scheduler service. Deploy by pointing Cloud at `app.py`, then add
+`GITHUB_TOKEN` (and any optional Alpaca/Finnhub keys) in the Cloud "Secrets"
+panel. The sibling-repo MCP servers are not available on Cloud, so the
+broker automatically falls back to `BROKER_BACKEND=sandbox` (yfinance fills,
+no Alpaca mirror) — set the variables in `.streamlit/secrets.toml.example`
+as a starting point.
+
 ## Repository layout
 
 See [`design.md`](design.md) §2.

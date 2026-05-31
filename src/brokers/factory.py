@@ -29,12 +29,16 @@ def build_broker(conn: sqlite3.Connection,
 
     if backend == "alpaca_paper":
         if long_term_client is None:
-            raise RuntimeError("alpaca_paper backend requires a LongTermClient")
+            log.warning("alpaca_paper requested but no LongTermClient; "
+                         "falling back to sandbox")
+            return SandboxBroker(conn)
         return AlpacaPaperBroker(conn, long_term_client)
 
     if backend == "dual":
         if long_term_client is None:
-            raise RuntimeError("dual backend requires a LongTermClient")
+            log.warning("dual requested but no LongTermClient; "
+                         "falling back to sandbox-only")
+            return SandboxBroker(conn)
         primary = SandboxBroker(conn)
         secondary = AlpacaPaperBroker(conn, long_term_client)
         return DualBroker(conn, primary=primary, secondary=secondary)
