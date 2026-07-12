@@ -65,6 +65,16 @@ docker compose up -d scheduler      # scheduler only
 docker compose up -d                # scheduler + dashboard on :8501
 ```
 
+The Docker image is fully self-contained: it installs the sibling MCP servers'
+own dependencies (`requirements-siblings.txt`) and pre-downloads the NLTK VADER
+lexicon, so the container runs the **real** short-term/long-term MCP servers
+with its own Python (`MCP_PYTHON=python3`) — the host `.venv` is never used
+inside Linux. The sibling repos are mounted from `SHORT_TERM_TRADER_PATH` /
+`STOCK_RECOMMENDER_PATH` (default `../short-term-trader` / `../stock-recommender`),
+and your real `.streamlit/secrets.toml` is mounted read-only at runtime. With
+valid secrets this gives you the full `dual` broker (local sandbox **and**
+Alpaca paper) inside Docker.
+
 > **One scheduler at a time.** `run.sh`, `scheduler.sh`, and the Docker
 > `scheduler` service each own all ticking. The Streamlit app can *also* run an
 > in-process scheduler (used on Streamlit Cloud). To avoid double-ticking the

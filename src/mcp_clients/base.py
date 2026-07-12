@@ -47,11 +47,19 @@ class MCPClient:
         self.module = module
         self.env_passthrough = tuple(env_passthrough)
         self.extra_env = dict(extra_env or {})
-        # Prefer the sibling repo's own venv so its deps (nltk, finnhub, …) are
-        # resolvable. Fall back to the explicit `python` arg, then `python3`.
+        # Interpreter selection precedence:
+        #   1. explicit `python=` arg (tests / callers)
+        #   2. $MCP_PYTHON env override (Docker sets this to the container python,
+        #      because a mounted host `.venv` is the wrong platform)
+        #   3. the sibling repo's own `.venv/bin/python` (native local runs)
+        #   4. `python3` on PATH
         if python is None:
-            sibling_venv = self.cwd / ".venv" / "bin" / "python"
-            self.python = str(sibling_venv) if sibling_venv.exists() else "python3"
+            env_python = os.environ.get("MCP_PYTHON")
+            if env_python:
+                self.python = env_python
+            else:
+                sibling_venv = self.cwd / ".venv" / "bin" / "python"
+                self.python = str(sibling_venv) if sibling_venv.exists() else "python3"
         else:
             self.python = python
         self.call_timeout = call_timeout

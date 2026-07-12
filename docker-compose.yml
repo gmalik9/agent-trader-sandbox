@@ -2,29 +2,37 @@ services:
   scheduler:
     build: .
     command: ["python", "-m", "src.scheduler.runner"]
-    env_file:
-      - .env
+    # Real secrets are mounted at runtime (kept out of the image by
+    # .dockerignore). We deliberately do NOT use `env_file: .env` here: a .env
+    # with blank/sandbox values would take precedence over secrets.toml and
+    # force the sandbox-only path.
     volumes:
       - ./data:/app/data
-      - ${SHORT_TERM_TRADER_PATH:-../short-term-trader}:/sibling/short-term-trader:ro
-      - ${STOCK_RECOMMENDER_PATH:-../stock-recommender}:/sibling/stock-recommender:ro
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+      # Sibling MCP servers, launched as subprocesses by the scheduler. Mounted
+      # read-write so the upstream Alpaca-paper audit log can be written.
+      - ${SHORT_TERM_TRADER_PATH:-../short-term-trader}:/sibling/short-term-trader:rw
+      - ${STOCK_RECOMMENDER_PATH:-../stock-recommender}:/sibling/stock-recommender:rw
     environment:
+      # Point the clients at the in-container sibling paths, and force the
+      # container's own Python to run them (a mounted host .venv is the wrong
+      # platform inside Linux). MCP_PYTHON is also baked into the image.
       SHORT_TERM_TRADER_PATH: /sibling/short-term-trader
       STOCK_RECOMMENDER_PATH: /sibling/stock-recommender
+      MCP_PYTHON: python3
     restart: unless-stopped
 
   web:
     build: .
     command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-    env_file:
-      - .env
+    volumes:
+      - ./data:/app/data
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
     environment:
       # The `scheduler` service owns all ticking; don't start a second one here.
       INPROCESS_SCHEDULER: "0"
     ports:
       - "8501:8501"
-    volumes:
-      - ./data:/app/data
     depends_on:
       - scheduler
     restart: unless-stopped

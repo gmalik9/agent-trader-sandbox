@@ -1,0 +1,15 @@
+# Dependencies for the sibling MCP servers (short-term-trader / stock-recommender)
+# that this agent launches as subprocesses. Installed into the Docker image so
+# the container's own Python can run them (a mounted host `.venv` is the wrong
+# platform inside Linux). These are the union of the two siblings' requirements
+# minus what agentic-trader already installs in requirements.txt.
+requests>=2.31
+nltk>=3.8
+scipy>=1.11
+finnhub-python>=2.4
+praw>=7.7
+fastapi>=0.110
+uvicorn[standard]>=0.27
+streamlit-autorefresh>=1.0
+streamlit-js-eval>=0.1.7
+python-dateutil>=2.8
