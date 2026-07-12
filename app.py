@@ -20,6 +20,7 @@ import streamlit as st
 
 from src.config import db_path, get_settings
 from src.sandbox import db as dbm
+from src.analysis import pnl as pnl_mod
 
 st.set_page_config(page_title="Agentic Trader", layout="wide")
 
@@ -114,6 +115,80 @@ def _scheduler_status() -> tuple[str, str]:
         except ValueError:
             pass
     return "Scheduler: not detected", help_text
+
+
+def _pnl_by_symbol(account_id: int) -> pd.DataFrame:
+    rows = pnl_mod.pnl_by_symbol(get_writable_conn(), account_id)
+    cols = ["symbol", "realized_pnl", "unrealized_pnl", "fees", "net_pnl",
+            "open_qty", "avg_cost", "mark", "trades"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _realized_pnl_timeseries(account_id: int) -> pd.DataFrame:
+    rows = pnl_mod.realized_pnl_timeseries(get_writable_conn(), account_id)
+    return pd.DataFrame(rows, columns=["ts", "cum_realized"])
+
+
+def _render_pnl_analysis(account_id: int, label: str) -> None:
+    """Render the P&L analysis block (metrics + per-stock table + chart)."""
+    st.markdown("### P&L analysis")
+    pnl = _pnl_by_symbol(account_id)
+    if pnl.empty:
+        st.info("No filled trades yet for this account, so there is no P&L to show. "
+                "Trigger a tick (during market hours for the day trader) to generate fills.")
+        return
+
+    realized = float(pnl["realized_pnl"].sum())
+    unrealized = float(pnl["unrealized_pnl"].sum())
+    fees = float(pnl["fees"].sum())
+    net = float(pnl["net_pnl"].sum())
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Realized P&L", f"${realized:,.2f}",
+              help="Locked-in profit/loss from closed (sold) quantity, using average-cost "
+                   "accounting. Does not include fees.")
+    m2.metric("Unrealized P&L", f"${unrealized:,.2f}",
+              help="Paper profit/loss on positions still open, marked at the latest price. "
+                   "Changes as prices move; not yet locked in.")
+    m3.metric("Fees", f"${fees:,.2f}",
+              help="Total commissions/slippage fees charged on this account's fills.")
+    m4.metric("Net P&L", f"${net:,.2f}",
+              help="Realized + unrealized − fees. The bottom-line total for this account.")
+
+    st.write("**Per-stock P&L**")
+    st.dataframe(
+        pnl, use_container_width=True, hide_index=True,
+        column_config={
+            "symbol": st.column_config.TextColumn("Symbol", help="Ticker."),
+            "realized_pnl": st.column_config.NumberColumn(
+                "Realized", format="$%.2f", help="Locked-in P&L from sold quantity."),
+            "unrealized_pnl": st.column_config.NumberColumn(
+                "Unrealized", format="$%.2f", help="Paper P&L on the still-open quantity."),
+            "fees": st.column_config.NumberColumn(
+                "Fees", format="$%.2f", help="Fees charged on this symbol's fills."),
+            "net_pnl": st.column_config.NumberColumn(
+                "Net", format="$%.2f", help="Realized + unrealized − fees for this symbol."),
+            "open_qty": st.column_config.NumberColumn(
+                "Open qty", help="Shares still held (0 if fully closed)."),
+            "avg_cost": st.column_config.NumberColumn(
+                "Avg cost", format="$%.2f", help="Average cost basis of the open shares."),
+            "mark": st.column_config.NumberColumn(
+                "Mark", format="$%.2f", help="Latest price used to mark open shares."),
+            "trades": st.column_config.NumberColumn(
+                "Fills", help="Number of filled orders for this symbol."),
+        },
+    )
+
+    ts = _realized_pnl_timeseries(account_id)
+    if not ts.empty:
+        st.write("**Cumulative realized P&L (net of fees)**")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=pd.to_datetime(ts["ts"]), y=ts["cum_realized"],
+            mode="lines+markers", name=label, line={"width": 2}))
+        fig.update_layout(height=280, margin={"t": 10, "b": 20, "l": 20, "r": 20},
+                           yaxis_title="USD")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # ---------------- header ----------------
@@ -234,6 +309,10 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
             "WHERE account_id IN (?, ?) ORDER BY ts DESC LIMIT 50",
             (aid_primary, aid_mirror or -1))
     st.dataframe(o, use_container_width=True, hide_index=True)
+
+    st.divider()
+    if aid_primary:
+        _render_pnl_analysis(aid_primary, f"{sub_account} (sandbox)")
 
     if st.button(f"Tick {name} now", key=f"tick_{name}",
                   help=f"Queue one immediate {name} agent run. The scheduler picks it up "

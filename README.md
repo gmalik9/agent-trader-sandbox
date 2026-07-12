@@ -22,6 +22,12 @@ Repo: https://github.com/gmalik9/agent-trader-sandbox
   against an independent venue.
 - **Streamlit dashboard** for equity curves, blotter, positions, PnL, and the
   agents' reasoning trace.
+- **Per-agent P&L analysis** (Day-Trader and Long-Term tabs): realized,
+  unrealized, fees and net totals, a per-stock breakdown, and a cumulative
+  realized-P&L chart. Computed with average-cost accounting in
+  [`src/analysis/pnl.py`](src/analysis/pnl.py). The sandbox only fills during
+  market hours, so to preview the analysis after-hours seed demo trades with
+  `python -m scripts.seed_demo_fills` (clear them with `--clear`).
 
 > Paper / simulated only. No live-money path exists in this repo.
 
