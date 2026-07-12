@@ -18,6 +18,9 @@ services:
     command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
     env_file:
       - .env
+    environment:
+      # The `scheduler` service owns all ticking; don't start a second one here.
+      INPROCESS_SCHEDULER: "0"
     ports:
       - "8501:8501"
     volumes:

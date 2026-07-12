@@ -32,12 +32,24 @@ def _start_background_scheduler():
     scheduler. We start one here once per app instance. `@st.cache_resource`
     guarantees a single instance across reruns.
 
+    Set `INPROCESS_SCHEDULER=0` to disable this — do that whenever a dedicated
+    scheduler process is already running (e.g. `run.sh` or the Docker
+    `scheduler` service), so the two don't double-tick the same book.
+
     Returns the runner so callers can introspect; failures are swallowed and
     logged so the UI still renders even if the scheduler can't start
     (e.g. missing secrets).
     """
     import logging
+    import os
     logging.basicConfig(level=logging.INFO)
+    if os.environ.get("INPROCESS_SCHEDULER", "1").strip().lower() in (
+        "0", "false", "no", "off",
+    ):
+        logging.getLogger(__name__).info(
+            "in-process scheduler disabled (INPROCESS_SCHEDULER); "
+            "expecting an external scheduler process")
+        return None
     try:
         from src.scheduler.runner import SchedulerRunner
         runner = SchedulerRunner(background=True)

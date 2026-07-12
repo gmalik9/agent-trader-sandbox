@@ -45,6 +45,44 @@ Or with Docker:
 docker compose up --build
 ```
 
+## Local always-on trading
+
+For unattended 24/7 ticking (independent of whether the Streamlit tab is open),
+run the dedicated scheduler process. It uses the **real** sibling MCP servers
+when `SHORT_TERM_TRADER_PATH` / `STOCK_RECOMMENDER_PATH` are configured, and
+falls back per-leg to the built-in yfinance provider if a server can't start.
+
+```bash
+# Headless, auto-restarting scheduler (no UI). Ctrl-C to stop.
+./scheduler.sh
+# detach + log:  nohup ./scheduler.sh & ; tail -f logs/scheduler.log
+```
+
+Or via Docker (the `scheduler` service has `restart: unless-stopped`):
+
+```bash
+docker compose up -d scheduler      # scheduler only
+docker compose up -d                # scheduler + dashboard on :8501
+```
+
+> **One scheduler at a time.** `run.sh`, `scheduler.sh`, and the Docker
+> `scheduler` service each own all ticking. The Streamlit app can *also* run an
+> in-process scheduler (used on Streamlit Cloud). To avoid double-ticking the
+> same book, set `INPROCESS_SCHEDULER=0` for the dashboard whenever a dedicated
+> scheduler is already running — `run.sh` and the Docker `web` service do this
+> automatically.
+
+### About the deployed sibling apps
+
+The companion projects are deployed as Streamlit **dashboards**
+([long-term](https://long-term-stock.streamlit.app/) /
+[short-term](https://short-term-stock.streamlit.app/)). Streamlit Cloud only
+runs each repo's `app.py`, **not** their MCP servers or FastAPI sidecars, so
+those public URLs can't be used as data endpoints for this agent. Signal
+sourcing is therefore: real sibling MCP subprocesses when running locally with
+the repos checked out, and the built-in yfinance fallback otherwise (including
+on Streamlit Cloud).
+
 ## Streamlit Cloud
 
 The app also runs on Streamlit Cloud as a single process: APScheduler is

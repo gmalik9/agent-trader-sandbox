@@ -26,5 +26,9 @@ python -m src.scheduler.runner > logs/scheduler.log 2>&1 &
 SCHED_PID=$!
 echo "Scheduler pid=$SCHED_PID (logs: logs/scheduler.log)"
 
+# The standalone scheduler above owns all ticking; tell the Streamlit process
+# NOT to start its own in-process scheduler (that would double-tick the book).
+export INPROCESS_SCHEDULER=0
+
 echo "Starting Streamlit on :8501..."
 exec streamlit run app.py --server.port 8501
