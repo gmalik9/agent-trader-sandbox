@@ -214,6 +214,12 @@ class SchedulerRunner:
             log.exception("coord_tick failed")
 
     def job_tick_poll(self) -> None:
+        # Heartbeat: record that the scheduler is alive so the UI can report it
+        # (this poll runs every 5s). Best-effort; never let it break the poll.
+        try:
+            dbm.set_setting(self.conn, "scheduler_heartbeat", now_utc().isoformat())
+        except Exception:
+            log.debug("heartbeat write failed", exc_info=True)
         try:
             rows = self.conn.execute(
                 "SELECT id, agent FROM tick_requests WHERE consumed_at IS NULL "

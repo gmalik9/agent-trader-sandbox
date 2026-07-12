@@ -91,6 +91,31 @@ def _enqueue_tick(agent: str) -> None:
     st.success(f"queued {agent} tick — scheduler will pick it up within ~5s")
 
 
+def _scheduler_status() -> tuple[str, str]:
+    """Report scheduler liveness for the header caption.
+
+    Prefers the in-process scheduler flag; otherwise checks the heartbeat the
+    external scheduler writes to `settings` every ~5s.
+    """
+    help_text = ("Where the trading scheduler runs. 'in-app' means this Streamlit "
+                 "process ticks the agents. 'external' means a separate scheduler "
+                 "process/container does (the recommended Docker setup). 'stale' "
+                 "means no heartbeat was seen in the last 30s — start it with "
+                 "`./trader start` or check `./trader logs scheduler`.")
+    if _scheduler:
+        return "Scheduler: in-app", help_text
+    hb = dbm.get_setting(get_writable_conn(), "scheduler_heartbeat")
+    if hb:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(hb)).total_seconds()
+            if age < 30:
+                return "Scheduler: external ✓", help_text
+            return f"Scheduler: external (stale {int(age)}s)", help_text
+        except ValueError:
+            pass
+    return "Scheduler: not detected", help_text
+
+
 # ---------------- header ----------------
 
 s = get_settings()
@@ -109,7 +134,8 @@ with hdr_r:
         st.error("KILL SWITCH ON")
     else:
         st.success("Kill switch OFF")
-    st.caption("Scheduler: in-app" if _scheduler else "Scheduler: external / not running")
+    _sched_status, _sched_help = _scheduler_status()
+    st.caption(_sched_status, help=_sched_help)
 
 
 tabs = st.tabs(["Overview", "Day-Trader", "Long-Term", "History",
@@ -152,16 +178,24 @@ with tabs[0]:
     c1, c2, c3 = st.columns(3)
     with c1:
         day_eq = float(eq_day.iloc[-1]["equity"]) if not eq_day.empty else 0.0
-        st.metric("Day equity", f"${day_eq:,.2f}")
+        st.metric("Day equity", f"${day_eq:,.2f}",
+                   help="Latest total equity (cash + positions) of the day-trading "
+                        "sub-account on the local sandbox venue. Updated by the "
+                        "mark-to-market job every minute during market hours.")
     with c2:
         long_eq = float(eq_long.iloc[-1]["equity"]) if not eq_long.empty else 0.0
-        st.metric("Long equity", f"${long_eq:,.2f}")
+        st.metric("Long equity", f"${long_eq:,.2f}",
+                   help="Latest total equity (cash + positions) of the long-term "
+                        "sub-account on the local sandbox venue.")
     with c3:
         div = df(
             "SELECT COUNT(*) AS n FROM dual_divergence WHERE ts >= ?",
             ((datetime.now(timezone.utc) - pd.Timedelta(days=1)).isoformat(),),
         )
-        st.metric("Divergence (24h)", int(div.iloc[0]["n"]) if not div.empty else 0)
+        st.metric("Divergence (24h)", int(div.iloc[0]["n"]) if not div.empty else 0,
+                   help="Number of times in the last 24h the sandbox and Alpaca-paper "
+                        "legs disagreed (fill price gap, a failed secondary order, or a "
+                        "status mismatch). See the History tab's divergence log for detail.")
 
     st.subheader("Recent orders (both venues)")
     orders = df(
@@ -177,11 +211,15 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
     snap_l, snap_r = st.columns(2)
     with snap_l:
         cash = dbm.get_cash(get_writable_conn(), aid_primary) if aid_primary else 0
-        st.metric(f"{sub_account} cash (sandbox)", f"${cash:,.2f}")
+        st.metric(f"{sub_account} cash (sandbox)", f"${cash:,.2f}",
+                   help="Uninvested cash in this sub-account on the local sandbox venue. "
+                        "Buys reduce it; sells increase it.")
     with snap_r:
         if aid_mirror:
             cash_m = dbm.get_cash(get_writable_conn(), aid_mirror)
-            st.metric(f"{mirror} cash (alpaca)", f"${cash_m:,.2f}")
+            st.metric(f"{mirror} cash (alpaca)", f"${cash_m:,.2f}",
+                       help="Cash reported for the mirrored Alpaca paper account, when the "
+                            "dual broker is active. Blank if only the sandbox is running.")
 
     positions = df(
         "SELECT symbol, qty, avg_cost, mark_price FROM positions_snapshot ps "
@@ -197,7 +235,11 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
             (aid_primary, aid_mirror or -1))
     st.dataframe(o, use_container_width=True, hide_index=True)
 
-    if st.button(f"Tick {name} now", key=f"tick_{name}"):
+    if st.button(f"Tick {name} now", key=f"tick_{name}",
+                  help=f"Queue one immediate {name} agent run. The scheduler picks it up "
+                       "within ~5s, asks the LLM for trade proposals, and places any that "
+                       "pass the risk checks. The day agent only trades during market hours; "
+                       "the long agent trades whenever run."):
         _enqueue_tick(name)
 
 
@@ -247,7 +289,10 @@ with tabs[4]:
     if not runs.empty:
         sel = st.number_input("Inspect run id", min_value=int(runs["id"].min()),
                                 max_value=int(runs["id"].max()),
-                                value=int(runs.iloc[0]["id"]))
+                                value=int(runs.iloc[0]["id"]),
+                                help="Enter an agent-run id from the table above to see its "
+                                     "full prompt, the LLM's final text, every tool call it "
+                                     "made, the sized/validated decisions, and any error.")
         detail = df("SELECT prompt, response, tools_called, decisions, error "
                      "FROM agent_runs WHERE id=?", (int(sel),))
         if not detail.empty:
@@ -271,7 +316,11 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("Runtime controls")
     cur_kill = dbm.get_setting(get_writable_conn(), "kill_switch") == "on"
-    new_kill = st.toggle("Kill switch (halts all agents)", value=cur_kill)
+    new_kill = st.toggle("Kill switch (halts all agents)", value=cur_kill,
+                          help="Master stop. When ON, every agent run short-circuits to "
+                               "'halted' within one scheduler tick (≤5s) and places no "
+                               "orders. Existing positions are left untouched. Turn OFF to "
+                               "resume automated trading.")
     if new_kill != cur_kill:
         dbm.set_setting(get_writable_conn(), "kill_switch", "on" if new_kill else "off")
         st.success(f"kill switch -> {'on' if new_kill else 'off'}")
@@ -279,10 +328,23 @@ with tabs[5]:
     st.divider()
     st.subheader("Manual ticks")
     c1, c2, c3, c4 = st.columns(4)
-    if c1.button("Mark-to-market now"): _enqueue_tick("mtm")
-    if c2.button("Day-trader tick"):     _enqueue_tick("day")
-    if c3.button("Long-term tick"):      _enqueue_tick("long")
-    if c4.button("Coordinator tick"):    _enqueue_tick("coordinator")
+    if c1.button("Mark-to-market now",
+                  help="Revalue all open positions in both sub-accounts at the latest "
+                       "prices and append a point to the equity curves. Safe to run "
+                       "anytime; places no orders."):
+        _enqueue_tick("mtm")
+    if c2.button("Day-trader tick",
+                  help="Run the intraday day-trading agent once. Only opens trades during "
+                       "market hours; force-flattens positions near the close."):
+        _enqueue_tick("day")
+    if c3.button("Long-term tick",
+                  help="Run the long-horizon investor agent once. Reviews recommendations "
+                       "and rebalances toward target weights; trades any time it is run."):
+        _enqueue_tick("long")
+    if c4.button("Coordinator tick",
+                  help="Run the capital coordinator once. Rebalances the cash split between "
+                       "the day and long sub-accounts; normally acts only early in the month."):
+        _enqueue_tick("coordinator")
 
     st.divider()
     st.subheader("Active configuration (read-only)")
