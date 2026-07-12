@@ -20,6 +20,9 @@ services:
       SHORT_TERM_TRADER_PATH: /sibling/short-term-trader
       STOCK_RECOMMENDER_PATH: /sibling/stock-recommender
       MCP_PYTHON: python3
+      # Compose already guarantees a single scheduler container; the pid-lock
+      # lives on the mounted data volume and would otherwise block restarts.
+      SCHEDULER_SKIP_LOCK: "1"
     restart: unless-stopped
 
   web:
@@ -32,7 +35,9 @@ services:
       # The `scheduler` service owns all ticking; don't start a second one here.
       INPROCESS_SCHEDULER: "0"
     ports:
-      - "8501:8501"
+      # Host port is configurable (default 8502) to avoid clashing with the
+      # sibling stock-recommender/short-term dashboards, which use 8501.
+      - "${WEB_PORT:-8502}:8501"
     depends_on:
       - scheduler
     restart: unless-stopped

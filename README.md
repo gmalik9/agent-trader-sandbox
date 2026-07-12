@@ -45,6 +45,29 @@ Or with Docker:
 docker compose up --build
 ```
 
+## `trader` — one command to run everything
+
+The simplest way to run the full stack (scheduler + dashboard) in Docker:
+
+```bash
+./trader start            # start scheduler + dashboard (build if needed)
+./trader start --build    # force a rebuild, then start
+./trader stop             # stop and remove containers
+./trader restart          # stop, then start
+./trader rebuild          # rebuild images from scratch (--no-cache) and start
+./trader status           # show container status (alias: ps)
+./trader logs scheduler   # follow logs (omit name for all services)
+./trader tick long        # queue a manual tick: day | long | coordinator | mtm
+./trader shell scheduler  # open a shell in a container
+./trader clean            # stop + remove containers/network (keeps data/)
+```
+
+The dashboard is served at **http://localhost:8502** (override with
+`WEB_PORT=... ./trader start`; the default avoids clashing with the sibling
+dashboards on 8501). With a valid `.streamlit/secrets.toml` this runs the full
+`dual` broker (local sandbox **and** Alpaca paper) using the real sibling MCP
+servers inside the container.
+
 ## Local always-on trading
 
 For unattended 24/7 ticking (independent of whether the Streamlit tab is open),

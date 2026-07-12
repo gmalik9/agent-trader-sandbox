@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# trader — single entrypoint to run the Agentic Trader stack via Docker Compose.
+#
+# Usage:
+#   ./trader start [--build]   Start scheduler + dashboard (detached)
+#   ./trader stop              Stop and remove containers
+#   ./trader restart           Stop then start
+#   ./trader rebuild           Rebuild images (no cache) and start
+#   ./trader build             Build images only
+#   ./trader status            Show container status
+#   ./trader logs [service]    Follow logs (default: all; e.g. `logs scheduler`)
+#   ./trader tick <agent>      Queue a manual tick: day | long | coordinator | mtm
+#   ./trader shell [service]   Open a shell in a container (default: scheduler)
+#   ./trader ps                Alias for status
+#   ./trader clean             Stop + remove containers, networks, and the
+#                              scheduler lock (does NOT delete your data/ ledger)
+#
+# Env:
+#   WEB_PORT   Host port for the dashboard (default 8502)
+#
+# The dashboard is served at http://localhost:${WEB_PORT:-8502}
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+WEB_PORT="${WEB_PORT:-8502}"
+export WEB_PORT
+
+# Pick `docker compose` (v2) or `docker-compose` (v1).
+if docker compose version >/dev/null 2>&1; then
+  DC=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  DC=(docker-compose)
+else
+  echo "error: Docker Compose not found. Install Docker Desktop." >&2
+  exit 1
+fi
+
+_require_secrets() {
+  if [[ ! -f .streamlit/secrets.toml ]]; then
+    echo "warning: .streamlit/secrets.toml not found." >&2
+    echo "  Copy the example and fill it in:" >&2
+    echo "    cp .streamlit/secrets.toml.example .streamlit/secrets.toml" >&2
+    echo "  Without it the app runs sandbox-only (no LLM, no Alpaca mirror)." >&2
+  fi
+}
+
+_clear_lock() {
+  # The scheduler pid-lock lives on the mounted data volume; a stale one from a
+  # hard-killed run would block startup.
+  rm -f data/scheduler.lock 2>/dev/null || true
+}
+
+_started_banner() {
+  echo
+  echo "Agentic Trader is starting."
+  echo "  Dashboard : http://localhost:${WEB_PORT}"
+  echo "  Logs      : ./trader logs scheduler"
+  echo "  Tick now  : ./trader tick long"
+}
+
+cmd="${1:-}"
+[[ $# -gt 0 ]] && shift || true
+
+case "$cmd" in
+  start)
+    _require_secrets
+    _clear_lock
+    if [[ "${1:-}" == "--build" ]]; then
+      "${DC[@]}" up -d --build
+    else
+      "${DC[@]}" up -d
+    fi
+    "${DC[@]}" ps
+    _started_banner
+    ;;
+
+  stop)
+    "${DC[@]}" down
+    ;;
+
+  restart)
+    "${DC[@]}" down
+    _clear_lock
+    "${DC[@]}" up -d
+    "${DC[@]}" ps
+    _started_banner
+    ;;
+
+  rebuild)
+    "${DC[@]}" down
+    _clear_lock
+    "${DC[@]}" build --no-cache
+    "${DC[@]}" up -d
+    "${DC[@]}" ps
+    _started_banner
+    ;;
+
+  build)
+    "${DC[@]}" build "$@"
+    ;;
+
+  status|ps)
+    "${DC[@]}" ps
+    ;;
+
+  logs)
+    "${DC[@]}" logs -f "$@"
+    ;;
+
+  tick)
+    agent="${1:-}"
+    case "$agent" in
+      day|long|coordinator|mtm) ;;
+      *) echo "usage: ./trader tick <day|long|coordinator|mtm>" >&2; exit 2 ;;
+    esac
+    "${DC[@]}" exec -T scheduler python -c "
+import sqlite3, datetime
+c = sqlite3.connect('data/sandbox.sqlite')
+c.execute(\"INSERT INTO tick_requests(ts, agent, requested_by) VALUES (?, ?, 'cli')\",
+          (datetime.datetime.now(datetime.timezone.utc).isoformat(), '$agent'))
+c.commit()
+print('queued $agent tick — scheduler drains within ~5s')
+"
+    ;;
+
+  shell)
+    svc="${1:-scheduler}"
+    "${DC[@]}" exec "$svc" bash
+    ;;
+
+  clean)
+    "${DC[@]}" down --remove-orphans
+    _clear_lock
+    echo "stopped; containers + network removed. data/ ledger preserved."
+    ;;
+
+  ""|help|-h|--help)
+    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+
+  *)
+    echo "unknown command: $cmd" >&2
+    echo "run './trader help' for usage" >&2
+    exit 2
+    ;;
+esac

@@ -60,6 +60,14 @@ class SchedulerRunner:
     # ---------------- lifecycle ----------------
 
     def _acquire_lock(self) -> None:
+        # In containers the process manager (Docker/compose) already guarantees a
+        # single scheduler instance, and the lock file lives on a mounted volume
+        # that survives restarts — where a recycled PID can make a stale lock look
+        # live. Allow skipping the pid-lock in that case.
+        if os.environ.get("SCHEDULER_SKIP_LOCK", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         if LOCK_PATH.exists():
             try:
