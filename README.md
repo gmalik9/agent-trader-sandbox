@@ -56,6 +56,22 @@ broker automatically falls back to `BROKER_BACKEND=sandbox` (yfinance fills,
 no Alpaca mirror) — set the variables in `.streamlit/secrets.toml.example`
 as a starting point.
 
+### Trade ideas without the sibling MCP servers
+
+The Day-Trader and Long-Term agents normally source ideas, quotes, and
+recommendations from the two sibling repos launched as local MCP subprocesses.
+Those repos don't exist on Streamlit Cloud, so when `SHORT_TERM_TRADER_PATH` /
+`STOCK_RECOMMENDER_PATH` are unset (or the subprocess can't start), the
+scheduler transparently swaps in a self-contained **yfinance-only fallback**
+(`src/signals/local.py`). It produces real momentum/trend ideas and prices, so
+the agents keep trading the sandbox book. Because the fallback can't reach the
+Alpaca write tools, the Alpaca paper mirror stays disabled in that mode.
+
+> Streamlit Cloud sleeps idle apps, which pauses the in-process scheduler.
+> While the app is open the agents tick on schedule (day ticks are gated to
+> market hours); you can also force a run anytime from the **Settings** tab's
+> "Tick now" buttons — the Long-Term agent trades immediately.
+
 ## Repository layout
 
 See [`design.md`](design.md) §2.

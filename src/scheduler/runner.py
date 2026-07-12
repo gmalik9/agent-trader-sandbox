@@ -35,6 +35,7 @@ from src.mcp_clients.long_term import LongTermClient
 from src.mcp_clients.short_term import ShortTermClient
 from src.sandbox import db as dbm
 from src.sandbox.clock import is_market_open, now_utc
+from src.signals.local import LocalLongTermClient, LocalShortTermClient
 
 log = logging.getLogger(__name__)
 LOCK_PATH = DATA_DIR / "scheduler.lock"
@@ -44,8 +45,8 @@ class SchedulerRunner:
     def __init__(self, *, background: bool = False) -> None:
         self.settings = get_settings()
         self.conn: sqlite3.Connection | None = None
-        self.short_term: ShortTermClient | None = None
-        self.long_term: LongTermClient | None = None
+        self.short_term: ShortTermClient | LocalShortTermClient | None = None
+        self.long_term: LongTermClient | LocalLongTermClient | None = None
         self.broker = None
         self.provider = None
         self.background = background
@@ -84,26 +85,17 @@ class SchedulerRunner:
                                  capital_total=self.settings.capital_total,
                                  split_day_pct=self.settings.split_day_pct)
 
-        if self.settings.short_term_trader_path:
-            try:
-                self.short_term = ShortTermClient()
-                self.short_term.start()
-                log.info("short-term MCP client up")
-            except Exception as e:
-                log.warning("short-term MCP client failed to start (%s); "
-                             "day-trader ticks will no-op", e)
-                self.short_term = None
-        if self.settings.stock_recommender_path:
-            try:
-                self.long_term = LongTermClient()
-                self.long_term.start()
-                log.info("long-term MCP client up")
-            except Exception as e:
-                log.warning("long-term MCP client failed to start (%s); "
-                             "long-term and Alpaca mirror will no-op", e)
-                self.long_term = None
+        # Idea/quote sources for the agents. Prefer the real sibling MCP servers
+        # when their paths are configured and they launch; otherwise fall back to
+        # the self-contained yfinance providers so the agents still trade (e.g.
+        # on Streamlit Cloud, where the sibling repos don't exist).
+        self.short_term = self._make_short_term()
+        self.long_term, long_mcp = self._make_long_term()
 
-        self.broker = build_broker(self.conn, long_term_client=self.long_term)
+        # The Alpaca paper leg REQUIRES the real upstream MCP client (it exposes
+        # the write tools). Never wire it to the local fallback — pass only the
+        # real MCP client (or None) so the broker falls back to sandbox-only.
+        self.broker = build_broker(self.conn, long_term_client=long_mcp)
 
         try:
             self.provider = get_provider()
@@ -111,6 +103,44 @@ class SchedulerRunner:
         except Exception as e:
             log.warning("no LLM provider configured (%s); LLM-driven ticks will error", e)
             self.provider = None
+
+    def _make_short_term(self) -> ShortTermClient | LocalShortTermClient:
+        """Real short-term MCP client if configured & healthy, else local fallback."""
+        if self.settings.short_term_trader_path:
+            try:
+                client = ShortTermClient()
+                client.start()
+                log.info("short-term MCP client up")
+                return client
+            except Exception as e:
+                log.warning("short-term MCP client failed to start (%s); "
+                             "using local yfinance idea provider", e)
+        else:
+            log.info("SHORT_TERM_TRADER_PATH unset; using local yfinance idea provider")
+        return LocalShortTermClient()
+
+    def _make_long_term(self) -> tuple[LongTermClient | LocalLongTermClient,
+                                        LongTermClient | None]:
+        """Return (agent_client, alpaca_leg_client).
+
+        ``agent_client`` is always usable (real MCP or local fallback).
+        ``alpaca_leg_client`` is the real MCP client or None — the Alpaca paper
+        broker leg is only wired when the real upstream is available.
+        """
+        if self.settings.stock_recommender_path:
+            try:
+                client = LongTermClient()
+                client.start()
+                log.info("long-term MCP client up")
+                return client, client
+            except Exception as e:
+                log.warning("long-term MCP client failed to start (%s); "
+                             "using local yfinance recommendation provider "
+                             "(Alpaca mirror disabled)", e)
+        else:
+            log.info("STOCK_RECOMMENDER_PATH unset; using local yfinance "
+                      "recommendation provider (Alpaca mirror disabled)")
+        return LocalLongTermClient(), None
 
     def teardown(self) -> None:
         self._stop.set()
