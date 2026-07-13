@@ -131,6 +131,15 @@ def _readable_ts_column(frame: pd.DataFrame, col: str = "ts", new: str = "When")
     return out
 
 
+def _to_dt(series: pd.Series) -> pd.Series:
+    """Robustly parse ISO-8601 timestamps that may mix microsecond precision.
+
+    Demo-seeded rows have no microseconds while live fills do; a fixed inferred
+    format then fails, so we parse each element per ISO-8601.
+    """
+    return pd.to_datetime(series, format="ISO8601", utc=True)
+
+
 def _enqueue_tick(agent: str) -> None:
     get_writable_conn().execute(
         "INSERT INTO tick_requests(ts, agent, requested_by) VALUES (?, ?, 'ui')",
@@ -315,7 +324,7 @@ def _render_pnl_analysis(account_id: int, label: str) -> None:
         st.write("**Cumulative realized P&L (net of fees)**")
         fig = go.Figure()
         fig.add_trace(go.Scatter(
-            x=pd.to_datetime(ts["ts"]), y=ts["cum_realized"],
+            x=_to_dt(ts["ts"]), y=ts["cum_realized"],
             mode="lines+markers", name=label, line={"width": 2}))
         fig.update_layout(height=280, margin={"t": 10, "b": 20, "l": 20, "r": 20},
                            yaxis_title="USD")
@@ -443,10 +452,10 @@ with tabs[0]:
 
     fig = go.Figure()
     if not eq_day.empty:
-        fig.add_trace(go.Scatter(x=pd.to_datetime(eq_day["ts"]), y=eq_day["equity"],
+        fig.add_trace(go.Scatter(x=_to_dt(eq_day["ts"]), y=eq_day["equity"],
                                    name="Day (sandbox primary)"))
     if not eq_long.empty:
-        fig.add_trace(go.Scatter(x=pd.to_datetime(eq_long["ts"]), y=eq_long["equity"],
+        fig.add_trace(go.Scatter(x=_to_dt(eq_long["ts"]), y=eq_long["equity"],
                                    name="Long (sandbox primary)"))
     # Also overlay alpaca-mirror sub-accounts if they have any equity.
     for sub, label in (("day_alpaca", "Day (alpaca mirror)"),
@@ -456,7 +465,7 @@ with tabs[0]:
             continue
         eq = df("SELECT ts, equity FROM equity_curve WHERE account_id=? ORDER BY ts", (aid,))
         if not eq.empty:
-            fig.add_trace(go.Scatter(x=pd.to_datetime(eq["ts"]), y=eq["equity"],
+            fig.add_trace(go.Scatter(x=_to_dt(eq["ts"]), y=eq["equity"],
                                        name=label, line={"dash": "dot"}))
     fig.update_layout(height=420, margin={"t": 20, "b": 20, "l": 20, "r": 20})
     st.plotly_chart(fig, use_container_width=True)
