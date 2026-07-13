@@ -115,8 +115,31 @@ class AlpacaPaperBroker(BrokerBase):
                                fill_price=None, fees=0.0, venue=self.name,
                                dual_group_id=req.dual_group_id)
 
-        ext_id = str(resp.get("order_id") or resp.get("id") or "")
-        status = str(resp.get("status", "routed_external"))
+        # Detect a non-order response: the upstream returns a blocked/dry-run/error
+        # dict (no order id/status) when trading is disabled or a cap is hit. Treat
+        # it as a failure instead of silently leaving the row as 'routed_external'.
+        ext_id = str(resp.get("order_id") or resp.get("id") or "") if isinstance(resp, dict) else ""
+        blocked = isinstance(resp, dict) and (
+            "blocked" in resp or "error" in resp or resp.get("dry_run") is True
+        )
+        if blocked or not ext_id:
+            reason = "unknown"
+            if isinstance(resp, dict):
+                reason = str(resp.get("blocked") or resp.get("error")
+                             or ("dry_run" if resp.get("dry_run") else "no_order_id"))
+            note = ""
+            if isinstance(resp, dict):
+                note = str(resp.get("message") or resp.get("blocked") or resp.get("error"))[:200]
+            log.error("alpaca order %s NOT placed (%s): %s", oid, reason, note)
+            self.conn.execute(
+                "UPDATE orders SET status='rejected', thesis=? WHERE id=?",
+                (f"alpaca_not_placed:{reason}|{req.thesis or ''}"[:500], oid),
+            )
+            return OrderResult(id=oid, external_id=None, status="rejected",
+                               fill_price=None, fees=0.0, venue=self.name,
+                               dual_group_id=req.dual_group_id)
+
+        status = str(resp.get("status", "accepted"))
         fill_price = resp.get("filled_avg_price") or resp.get("fill_price")
         fill_price = float(fill_price) if fill_price is not None else None
         filled_at = resp.get("filled_at") or (now_s if status == "filled" else None)
@@ -165,8 +188,17 @@ class AlpacaPaperBroker(BrokerBase):
             self.conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (oid,))
             return OrderResult(id=oid, external_id=None, status="rejected",
                                fill_price=None, fees=0.0, venue=self.name)
-        ext_id = str(resp.get("order_id") or resp.get("id") or "")
-        status = str(resp.get("status", "routed_external"))
+        ext_id = str(resp.get("order_id") or resp.get("id") or "") if isinstance(resp, dict) else ""
+        blocked = isinstance(resp, dict) and ("blocked" in resp or "error" in resp)
+        if blocked or not ext_id:
+            reason = "unknown"
+            if isinstance(resp, dict):
+                reason = str(resp.get("blocked") or resp.get("error") or "no_order_id")
+            log.error("alpaca close_position %s NOT placed (%s)", oid, reason)
+            self.conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (oid,))
+            return OrderResult(id=oid, external_id=None, status="rejected",
+                               fill_price=None, fees=0.0, venue=self.name)
+        status = str(resp.get("status", "accepted"))
         self.conn.execute(
             "UPDATE orders SET external_id=?, status=? WHERE id=?",
             (ext_id or None, status, oid),
