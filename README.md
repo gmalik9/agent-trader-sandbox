@@ -26,6 +26,13 @@ Repo: https://github.com/gmalik9/agent-trader-sandbox
   to open a negative position) and leveraged/inverse ETFs. The sandbox uses a
   margin model capped at `MAX_LEVERAGE`× equity. Toggle with `ALLOW_SHORTING`,
   `ALLOW_LEVERAGED`, `MAX_LEVERAGE` (all paper/simulated only).
+- **Options (calls & puts) on Alpaca.** When the paper account has options
+  approved, the Day-Trader can look up the option chain
+  (`list_option_contracts`) and buy calls/puts (`propose_option`) via a direct
+  paper-only Alpaca client ([`src/brokers/alpaca_options.py`](src/brokers/alpaca_options.py)).
+  Orders are third-party tracked on Alpaca and mirrored into the local `orders`
+  table (`venue='alpaca_options'`) with the agent's reasoning logged like every
+  other trade.
 - **Streamlit dashboard** for equity curves, blotter, positions, PnL, and the
   agents' reasoning trace.
 - **Per-agent P&L analysis** (Day-Trader and Long-Term tabs): realized,

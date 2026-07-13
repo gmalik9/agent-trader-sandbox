@@ -12,6 +12,11 @@ real-money order.** This file documents the guarantees that make that true.
      server, which is itself hard-coded to `https://paper-api.alpaca.markets`
      and asserts `ALPACA_PAPER=true` and that the account number starts with
      `PA`.
+   - `AlpacaOptions` (calls/puts) — a direct client that is also hard-coded to
+     `https://paper-api.alpaca.markets`, asserts `ALPACA_PAPER=true`, and
+     verifies the account number starts with `PA` before any write. Option
+     orders are third-party tracked on Alpaca and mirrored into the local
+     `orders` table with `venue='alpaca_options'`.
 2. **DualBroker is paper-only by construction** — it composes the two above
    and has no other backend.
 3. **Kill-switch.** A row in `settings(key='kill_switch', value='on')` halts

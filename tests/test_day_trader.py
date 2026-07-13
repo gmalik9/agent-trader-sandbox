@@ -97,6 +97,73 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     assert pos.get("AAPL") == 42.0
 
 
+class FakeOptions:
+    """Stand-in for AlpacaOptions."""
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.orders = []
+
+    def options_enabled(self):
+        return True
+
+    def find_contracts(self, underlying, *, option_type="call", limit=15):
+        return [{"symbol": f"{underlying}250620C00190000", "underlying": underlying,
+                 "type": option_type, "strike": 190.0, "expiration": "2025-06-20",
+                 "close_price": 3.20}]
+
+    def place_order(self, *, occ_symbol, qty, side, order_type="market",
+                    limit_price=None, time_in_force="day"):
+        self.orders.append({"occ": occ_symbol, "qty": qty, "side": side})
+        if self.fail:
+            raise RuntimeError("alpaca options outage")
+        return {"id": "opt-xyz", "status": "accepted", "symbol": occ_symbol}
+
+
+def _propose_option(occ="AAPL250620C00190000", qty=1, side="buy"):
+    return ChatResult(text=None, tool_calls=[ToolCall(
+        id="o1", name="propose_option",
+        arguments={"occ_symbol": occ, "qty": qty, "side": side, "thesis": "bullish"})])
+
+
+def test_option_order_placed_and_recorded(tmp_db, stub_bars):
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    opts = FakeOptions()
+    prov = ScriptedProvider([_propose_option(), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov,
+                            now=MARKET_OPEN, options=opts)
+    out = agent.run_once()
+    assert out.status == "ok"
+    assert len(opts.orders) == 1 and opts.orders[0]["occ"] == "AAPL250620C00190000"
+    row = tmp_db.execute(
+        "SELECT symbol, status, external_id, venue FROM orders WHERE venue='alpaca_options'"
+    ).fetchone()
+    assert row["symbol"] == "AAPL250620C00190000"
+    assert row["status"] == "accepted" and row["external_id"] == "opt-xyz"
+
+
+def test_option_order_failure_recorded_as_rejected(tmp_db, stub_bars):
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    opts = FakeOptions(fail=True)
+    prov = ScriptedProvider([_propose_option(), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov,
+                            now=MARKET_OPEN, options=opts)
+    out = agent.run_once()
+    assert out.status == "ok"
+    row = tmp_db.execute(
+        "SELECT status FROM orders WHERE venue='alpaca_options'"
+    ).fetchone()
+    assert row["status"] == "rejected"
+
+
+def test_no_options_client_runs_fine(tmp_db, stub_bars):
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    prov = ScriptedProvider([ChatResult(text="no trades today")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
+    out = agent.run_once()
+    assert out.status == "ok"
+
+
 def test_max_concurrent_positions_rejects_extra(tmp_db, stub_bars, monkeypatch):
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
     monkeypatch.setenv("COMMISSION_BPS", "0")

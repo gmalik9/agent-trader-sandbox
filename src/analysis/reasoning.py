@@ -27,9 +27,9 @@ log = logging.getLogger(__name__)
 READ_TOOLS = {
     "get_recommendations", "get_portfolio_suggestion", "list_intraday_ideas",
     "get_quote", "lookup_ticker", "get_news", "current_positions",
-    "account_snapshot", "scan_latest", "market_status",
+    "account_snapshot", "scan_latest", "market_status", "list_option_contracts",
 }
-PROPOSE_TOOLS = {"propose_trade", "propose_rebalance"}
+PROPOSE_TOOLS = {"propose_trade", "propose_rebalance", "propose_option"}
 
 _TOOL_LABEL = {
     "get_recommendations": "Long-term stock recommendations",
@@ -42,6 +42,7 @@ _TOOL_LABEL = {
     "account_snapshot": "Account equity & cash",
     "scan_latest": "Latest market scan",
     "market_status": "Market open/close status",
+    "list_option_contracts": "Option chain (calls/puts)",
 }
 
 

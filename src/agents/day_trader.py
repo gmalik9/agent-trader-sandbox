@@ -57,6 +57,10 @@ Constraints (you do NOT need to enforce these — the runtime will):
 - The runtime sizes positions for 1% account risk via your stop.
 - Max 5 concurrent positions across the book; gross exposure is capped by leverage.
 - All positions are force-closed by 15:55 ET, so do not open new positions after 15:30 ET.
+You may also express a view with OPTIONS (calls/puts) on Alpaca paper: call
+`list_option_contracts` to see the chain, then `propose_option` with the chosen
+OCC symbol. Buying a call is bullish; buying a put is bearish. Keep options
+size small (1-2 contracts) given their leverage.
 If no idea has both a clear setup and a defined stop, output `no trades today` and call no tools.
 """
 
@@ -70,16 +74,25 @@ class _Proposal:
     thesis: str = ""
 
 
+@dataclass
+class _OptionProposal:
+    occ_symbol: str
+    qty: int
+    side: str = "buy"  # 'buy' (open long call/put) | 'sell'
+    thesis: str = ""
+
+
 class DayTraderAgent(AgentBase):
     name = "day"
     sub_account = "day"
 
     def __init__(self, conn: sqlite3.Connection, broker: BrokerBase,
                  short_term: ShortTermClient, provider: LLMProvider | None = None,
-                 *, now: datetime | None = None) -> None:
+                 *, now: datetime | None = None, options=None) -> None:
         super().__init__(conn, broker, provider)
         self.short_term = short_term
         self._now = now  # injectable for tests
+        self.options = options  # AlpacaOptions | None — enables call/put trading
 
     def _wall(self) -> datetime:
         return self._now or now_utc()
@@ -127,18 +140,20 @@ class DayTraderAgent(AgentBase):
             return RunOutcome(status="no-op", run_id=rid)
 
         # Ask the LLM.
-        proposals, loop_res = self._run_llm_loop()
+        proposals, option_proposals, loop_res = self._run_llm_loop()
         decisions = self._validate_and_size(proposals)
         orders = self._place(decisions)
+        option_orders = self._place_options(option_proposals)
 
+        all_decisions = [d.__dict__ for d in decisions] + option_orders
         rid = self._record_run(
             status="ok", prompt=SYSTEM_PROMPT[:200], response=loop_res.final_text,
             tools_called=[asdict_step(s) for s in loop_res.steps],
-            decisions=[d.__dict__ for d in decisions],
+            decisions=all_decisions,
             error=None, latency_ms=time_ms() - start,
         )
-        return RunOutcome(status="ok", decisions=[d.__dict__ for d in decisions],
-                          orders=orders, run_id=rid)
+        return RunOutcome(status="ok", decisions=all_decisions,
+                          orders=orders + option_orders, run_id=rid)
 
     # ---------------- pieces ----------------
 
@@ -170,6 +185,7 @@ class DayTraderAgent(AgentBase):
 
     def _run_llm_loop(self):
         proposals: list[_Proposal] = []
+        option_proposals: list[_OptionProposal] = []
 
         def list_intraday_ideas(*, tier: str = "A", limit: int = 10) -> dict:
             try:
@@ -198,6 +214,24 @@ class DayTraderAgent(AgentBase):
                                                else "buy"),
                                          thesis=thesis))
             return {"ok": True, "buffered": len(proposals)}
+
+        def list_option_contracts(*, underlying: str, option_type: str = "call",
+                                   limit: int = 15) -> dict:
+            if self.options is None:
+                return {"error": "options_unavailable"}
+            try:
+                cs = self.options.find_contracts(underlying, option_type=option_type,
+                                                  limit=limit)
+                return {"count": len(cs), "contracts": cs}
+            except Exception as e:
+                return {"error": str(e)}
+
+        def propose_option(*, occ_symbol: str, qty: int = 1, side: str = "buy",
+                           thesis: str = "") -> dict:
+            option_proposals.append(_OptionProposal(
+                occ_symbol=occ_symbol.upper(), qty=max(1, int(qty)),
+                side=("sell" if str(side).lower() == "sell" else "buy"), thesis=thesis))
+            return {"ok": True, "buffered": len(option_proposals)}
 
         handlers = [
             ToolHandler(spec=ToolSpec(
@@ -236,11 +270,67 @@ class DayTraderAgent(AgentBase):
                 fn=propose_trade),
         ]
 
+        if self.options is not None:
+            handlers += [
+                ToolHandler(spec=ToolSpec(
+                    name="list_option_contracts",
+                    description=("List tradable option contracts (calls or puts) for an "
+                                  "underlying on Alpaca paper. Use to pick an OCC symbol for "
+                                  "`propose_option`."),
+                    json_schema={"type": "object", "required": ["underlying"], "properties": {
+                        "underlying": {"type": "string"},
+                        "option_type": {"type": "string", "enum": ["call", "put"],
+                                         "default": "call"},
+                        "limit": {"type": "integer", "default": 15}}}),
+                    fn=list_option_contracts),
+                ToolHandler(spec=ToolSpec(
+                    name="propose_option",
+                    description=("Buffer an options order. occ_symbol is an OCC option symbol "
+                                  "from `list_option_contracts` (e.g. 'AAPL250620C00190000'). "
+                                  "side='buy' opens a long call/put; qty is number of contracts "
+                                  "(1 = 100 shares). Placed directly on Alpaca paper."),
+                    json_schema={"type": "object", "required": ["occ_symbol"], "properties": {
+                        "occ_symbol": {"type": "string"},
+                        "qty": {"type": "integer", "default": 1},
+                        "side": {"type": "string", "enum": ["buy", "sell"], "default": "buy"},
+                        "thesis": {"type": "string"}}}),
+                    fn=propose_option),
+            ]
+
+        opt_hint = ("" if self.options is None else
+                    " You may also trade CALL or PUT options via `list_option_contracts` "
+                    "then `propose_option` when an options play has a clearer risk/reward.")
         user = (f"It is {self._wall().isoformat()}. You have a day-trading sub-account. "
                 "Use the tools to evaluate today's ideas, then call `propose_trade` for "
-                "any high-conviction longs.")
+                "any high-conviction longs or shorts." + opt_hint)
         loop_res = self._run_llm(SYSTEM_PROMPT, user, handlers, max_steps=8)
-        return proposals, loop_res
+        return proposals, option_proposals, loop_res
+
+    def _place_options(self, proposals: list[_OptionProposal]) -> list[dict]:
+        """Place buffered option orders directly on Alpaca; record + return each."""
+        from src.brokers.alpaca_options import OptionsRecorder
+        out: list[dict] = []
+        if self.options is None or not proposals:
+            return out
+        recorder = OptionsRecorder(self.conn)
+        for p in proposals:
+            try:
+                resp = self.options.place_order(occ_symbol=p.occ_symbol, qty=p.qty, side=p.side)
+                oid = recorder.record(sub_account=self.sub_account, occ_symbol=p.occ_symbol,
+                                       side=p.side, qty=p.qty, agent=self.name,
+                                       thesis=p.thesis, resp=resp)
+                out.append({"id": oid, "symbol": p.occ_symbol, "side": p.side, "qty": p.qty,
+                            "instrument": "option", "status": str(resp.get("status", "")),
+                            "external_id": resp.get("id"), "thesis": p.thesis, "accepted": True})
+            except Exception as e:  # noqa: BLE001
+                log.exception("option order failed for %s", p.occ_symbol)
+                oid = recorder.record(sub_account=self.sub_account, occ_symbol=p.occ_symbol,
+                                       side=p.side, qty=p.qty, agent=self.name,
+                                       thesis=p.thesis, resp=None, error=str(e)[:200])
+                out.append({"id": oid, "symbol": p.occ_symbol, "side": p.side, "qty": p.qty,
+                            "instrument": "option", "status": "rejected",
+                            "thesis": p.thesis, "accepted": False, "reject_reason": str(e)[:120]})
+        return out
 
     def _validate_and_size(self, proposals: list[_Proposal]) -> list[Decision]:
         acct = self.broker.get_account(self.sub_account)

@@ -551,6 +551,30 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
     if aid_primary:
         _render_pnl_analysis(aid_primary, f"{sub_account} (sandbox)")
 
+    # Options (calls/puts) — routed straight to Alpaca, venue='alpaca_options'.
+    opts = df(
+        "SELECT ts, symbol, side, qty, status, fill_price, external_id, thesis "
+        "FROM orders WHERE venue='alpaca_options' AND agent=? ORDER BY ts DESC LIMIT 30",
+        (name,),
+    )
+    if not opts.empty:
+        st.divider()
+        st.markdown("### Options (calls/puts) — Alpaca")
+        st.caption("Option orders route directly to Alpaca paper (OCC symbols, "
+                    "1 contract = 100 shares). 'accepted'/'filled' with an external_id "
+                    "means Alpaca took the order.")
+        st.dataframe(
+            _readable_ts_column(opts), use_container_width=True, hide_index=True,
+            column_config={
+                "symbol": st.column_config.TextColumn("Contract (OCC)"),
+                "side": st.column_config.TextColumn("Side"),
+                "qty": st.column_config.NumberColumn("Contracts"),
+                "fill_price": st.column_config.NumberColumn("Fill", format="$%.2f"),
+                "external_id": st.column_config.TextColumn("Alpaca ID"),
+                "thesis": st.column_config.TextColumn("Why", width="large"),
+            },
+        )
+
     st.divider()
     _render_agent_reasoning(name, latest_only=True)
 

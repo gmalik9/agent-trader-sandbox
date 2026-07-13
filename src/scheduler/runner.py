@@ -48,6 +48,7 @@ class SchedulerRunner:
         self.short_term: ShortTermClient | LocalShortTermClient | None = None
         self.long_term: LongTermClient | LocalLongTermClient | None = None
         self.broker = None
+        self.options = None
         self.provider = None
         self.background = background
         cls = BackgroundScheduler if background else BlockingScheduler
@@ -105,6 +106,10 @@ class SchedulerRunner:
         # real MCP client (or None) so the broker falls back to sandbox-only.
         self.broker = build_broker(self.conn, long_term_client=long_mcp)
 
+        # Options (calls/puts) go straight to Alpaca paper via a direct client,
+        # enabled only when paper credentials are present and options are approved.
+        self.options = self._make_options()
+
         try:
             self.provider = get_provider()
             log.info("LLM provider: %s / %s", self.provider.name, self.provider.model)
@@ -150,6 +155,19 @@ class SchedulerRunner:
                       "recommendation provider (Alpaca mirror disabled)")
         return LocalLongTermClient(), None
 
+    def _make_options(self):
+        """Return an AlpacaOptions client if paper options are available, else None."""
+        try:
+            from src.brokers.alpaca_options import AlpacaOptions
+            opt = AlpacaOptions()
+            if opt.options_enabled():
+                log.info("Alpaca options enabled (calls/puts available)")
+                return opt
+            log.info("Alpaca options not approved on this account; options disabled")
+        except Exception as e:  # noqa: BLE001
+            log.warning("options client unavailable (%s); options disabled", e)
+        return None
+
     def teardown(self) -> None:
         self._stop.set()
         for c in (self.short_term, self.long_term):
@@ -169,7 +187,7 @@ class SchedulerRunner:
 
     def _day_agent(self) -> DayTraderAgent:
         return DayTraderAgent(self.conn, self.broker, self.short_term,
-                                provider=self.provider)
+                                provider=self.provider, options=self.options)
 
     def _long_agent(self) -> LongTermAgent:
         return LongTermAgent(self.conn, self.broker, self.long_term,
