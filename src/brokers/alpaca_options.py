@@ -31,6 +31,7 @@ from src.sandbox import db as dbm
 log = logging.getLogger(__name__)
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+DATA_BASE_URL = "https://data.alpaca.markets"
 
 
 class OptionsSafetyError(RuntimeError):
@@ -73,6 +74,41 @@ class AlpacaOptions:
                 f"alpaca {method} {path} -> {resp.status_code}: {resp.text[:300]}")
         return resp.json() if resp.content else {}
 
+    def _data_get(self, path: str, params: dict | None = None) -> Any:
+        """GET against the Alpaca market-data host (quotes/snapshots)."""
+        self._assert_paper()
+        url = f"{DATA_BASE_URL}{path}"
+        with httpx.Client(timeout=self._timeout) as client:
+            resp = client.get(url, headers=self._headers(), params=params)
+        if resp.status_code >= 400:
+            raise OptionsSafetyError(
+                f"alpaca data GET {path} -> {resp.status_code}: {resp.text[:200]}")
+        return resp.json() if resp.content else {}
+
+    def latest_option_quotes(self, occ_symbols: list[str]) -> dict[str, dict]:
+        """Latest NBBO bid/ask per OCC symbol. Empty dict on any failure."""
+        if not occ_symbols:
+            return {}
+        try:
+            data = self._data_get(
+                "/v1beta1/options/quotes/latest",
+                params={"symbols": ",".join(occ_symbols[:100])},
+            )
+        except Exception:
+            return {}
+        quotes = data.get("quotes", {}) or {}
+        out: dict[str, dict] = {}
+        for sym, q in quotes.items():
+            bid = float(q.get("bp", 0) or 0)
+            ask = float(q.get("ap", 0) or 0)
+            mid = round((bid + ask) / 2, 4) if (bid and ask) else None
+            spread = round(ask - bid, 4) if (bid and ask) else None
+            spread_pct = round(100.0 * spread / mid, 2) if (spread is not None and mid) else None
+            out[sym] = {"bid": bid, "ask": ask, "mid": mid,
+                        "spread": spread, "spread_pct": spread_pct,
+                        "bid_size": q.get("bs"), "ask_size": q.get("as")}
+        return out
+
     def _verify_paper_account(self) -> None:
         if self._verified:
             return
@@ -99,10 +135,13 @@ class AlpacaOptions:
                        limit: int = 20, expiration_gte: str | None = None,
                        expiration_lte: str | None = None,
                        strike_gte: float | None = None,
-                       strike_lte: float | None = None) -> list[dict]:
+                       strike_lte: float | None = None,
+                       with_quotes: bool = True) -> list[dict]:
         """List tradable option contracts for an underlying.
 
-        `option_type` is 'call' or 'put'. Returns simplified contract dicts.
+        `option_type` is 'call' or 'put'. When ``with_quotes`` is set, each
+        contract is enriched with live NBBO bid/ask/mid/spread so callers can
+        filter out illiquid or wide-spread strikes.
         """
         params: dict[str, Any] = {
             "underlying_symbols": underlying.upper(),
@@ -132,6 +171,13 @@ class AlpacaOptions:
                 "open_interest": c.get("open_interest"),
                 "close_price": c.get("close_price"),
             })
+        if with_quotes and out:
+            quotes = self.latest_option_quotes([c["symbol"] for c in out])
+            for c in out:
+                q = quotes.get(c["symbol"])
+                if q:
+                    c.update({"bid": q["bid"], "ask": q["ask"], "mid": q["mid"],
+                              "spread": q["spread"], "spread_pct": q["spread_pct"]})
         return out
 
     def list_positions(self) -> list[dict]:

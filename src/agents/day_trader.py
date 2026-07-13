@@ -339,9 +339,10 @@ class DayTraderAgent(AgentBase):
 
         def get_quote(symbol: str) -> dict:
             try:
-                return self.short_term.lookup_ticker(symbol, interval="5m", period="1d")
+                raw = self.short_term.lookup_ticker(symbol, interval="5m", period="1d")
             except Exception as e:
                 return {"error": str(e)}
+            return _summarize_quote(symbol, raw)
 
         def get_news(symbol: str, *, days: int = 2) -> dict:
             try:
@@ -393,7 +394,11 @@ class DayTraderAgent(AgentBase):
                 }}), fn=list_intraday_ideas),
             ToolHandler(spec=ToolSpec(
                 name="get_quote",
-                description="Get a recent 5m quote/series for a symbol.",
+                description=("Compact intraday snapshot for a symbol: last price, session "
+                              "VWAP and price-vs-VWAP, volume z-score (unusual volume), RSI, "
+                              "MACD, ATR / ATR%, Bollinger position, and SMA(20/50/200) trend "
+                              "context. Use it to confirm the technical setup, structure, and "
+                              "a realistic stop distance."),
                 json_schema={"type": "object", "required": ["symbol"], "properties": {
                     "symbol": {"type": "string"}}}), fn=get_quote),
             ToolHandler(spec=ToolSpec(
@@ -435,8 +440,11 @@ class DayTraderAgent(AgentBase):
                 ToolHandler(spec=ToolSpec(
                     name="list_option_contracts",
                     description=("List tradable option contracts (calls or puts) for an "
-                                  "underlying on Alpaca paper. Use to pick an OCC symbol for "
-                                  "`propose_option`."),
+                                  "underlying on Alpaca paper, enriched with live bid / ask / "
+                                  "mid / spread% and open interest so you can pick a LIQUID, "
+                                  "tight-spread strike. Use to choose an OCC symbol for "
+                                  "`propose_option`; avoid strikes with no quotes or a wide "
+                                  "spread_pct."),
                     json_schema={"type": "object", "required": ["underlying"], "properties": {
                         "underlying": {"type": "string"},
                         "option_type": {"type": "string", "enum": ["call", "put"],
@@ -577,3 +585,77 @@ class DayTraderAgent(AgentBase):
 
 def asdict_step(s) -> dict:
     return {"step": s.step, "text": s.text, "tool_calls": s.tool_calls}
+
+
+def _f(v):
+    try:
+        return round(float(v), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarize_quote(symbol: str, raw: dict) -> dict:
+    """Condense a lookup_ticker payload into a compact indicator snapshot.
+
+    The upstream returns ~60 enriched bars; the LLM only needs the latest read
+    plus a few derived signals (price vs VWAP/SMAs, volume z-score, RSI/MACD
+    zones, ATR%) to judge structure and a realistic stop.
+    """
+    if not isinstance(raw, dict) or raw.get("error"):
+        return {"symbol": symbol.upper(), "error": (raw or {}).get("error", "no_data")}
+    bars = raw.get("bars") or []
+    if not bars:
+        # Local fallback returns a flat quote dict instead of bars.
+        return {"symbol": symbol.upper(), "price": _f(raw.get("price") or raw.get("last")),
+                "source": raw.get("source", "unknown"), "note": "no intraday bars"}
+    last = bars[-1]
+    price = _f(last.get("close"))
+    vwap = _f(last.get("vwap"))
+    sma20, sma50, sma200 = _f(last.get("sma_20")), _f(last.get("sma_50")), _f(last.get("sma_200"))
+    rsi = _f(last.get("rsi"))
+    atr = _f(last.get("atr"))
+    atr_pct = _f(last.get("atr_pct"))
+    macd, macd_sig = _f(last.get("macd")), _f(last.get("signal"))
+    vol_z = _f(last.get("vol_z"))
+
+    def _rel(p, ref):
+        if p is None or ref is None or ref == 0:
+            return None
+        return round(100.0 * (p - ref) / ref, 2)
+
+    rsi_zone = None
+    if rsi is not None:
+        rsi_zone = "overbought" if rsi >= 70 else ("oversold" if rsi <= 30 else "neutral")
+    macd_state = None
+    if macd is not None and macd_sig is not None:
+        macd_state = "bullish" if macd > macd_sig else "bearish"
+    trend = None
+    if price is not None and sma50 is not None and sma200 is not None:
+        if price > sma50 > sma200:
+            trend = "up"
+        elif price < sma50 < sma200:
+            trend = "down"
+        else:
+            trend = "mixed"
+
+    return {
+        "symbol": symbol.upper(),
+        "price": price,
+        "vwap": vwap,
+        "pct_vs_vwap": _rel(price, vwap),
+        "above_vwap": (price is not None and vwap is not None and price > vwap),
+        "rsi": rsi,
+        "rsi_zone": rsi_zone,
+        "macd": macd,
+        "macd_state": macd_state,
+        "atr": atr,
+        "atr_pct": atr_pct,
+        "vol_z": vol_z,                       # >2 = unusually high volume
+        "unusual_volume": (vol_z is not None and vol_z >= 2.0),
+        "sma_20": sma20,
+        "sma_50": sma50,
+        "sma_200": sma200,
+        "trend": trend,
+        "pct_vs_sma20": _rel(price, sma20),
+        "source": raw.get("source", "mcp"),
+    }

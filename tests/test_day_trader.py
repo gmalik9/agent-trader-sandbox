@@ -36,6 +36,29 @@ class FakeShortTerm:
         return {"symbol": ticker, "news": [], "sentiment": "neutral"}
 
 
+def test_summarize_quote_derives_indicator_signals():
+    from src.agents.day_trader import _summarize_quote
+    raw = {"ticker": "AAPL", "bars": [{
+        "close": 320.0, "vwap": 316.0, "rsi": 72.0, "atr": 1.5, "atr_pct": 0.47,
+        "macd": 0.4, "signal": 0.2, "vol_z": 2.5,
+        "sma_20": 315.0, "sma_50": 310.0, "sma_200": 300.0,
+    }]}
+    s = _summarize_quote("AAPL", raw)
+    assert s["symbol"] == "AAPL"
+    assert s["above_vwap"] is True
+    assert s["pct_vs_vwap"] == round(100 * (320 - 316) / 316, 2)
+    assert s["rsi_zone"] == "overbought"
+    assert s["macd_state"] == "bullish"
+    assert s["unusual_volume"] is True       # vol_z >= 2
+    assert s["trend"] == "up"                # price > sma50 > sma200
+
+
+def test_summarize_quote_handles_flat_fallback_quote():
+    from src.agents.day_trader import _summarize_quote
+    s = _summarize_quote("KO", {"price": 60.0, "source": "local-yfinance"})
+    assert s["symbol"] == "KO" and s["price"] == 60.0
+
+
 class ScriptedProvider:
     name = "scripted"
     model = "scripted"
