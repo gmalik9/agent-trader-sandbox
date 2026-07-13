@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # LLM
     llm_provider: str = Field(default="github")
-    llm_model: str = Field(default="openai/gpt-4o-mini")
+    llm_model: str = Field(default="openai/gpt-5")
     github_token: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""

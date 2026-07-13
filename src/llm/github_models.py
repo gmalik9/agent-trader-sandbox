@@ -20,6 +20,15 @@ log = logging.getLogger(__name__)
 
 ENDPOINT = "https://models.github.ai/inference/chat/completions"
 
+# Newer OpenAI families (GPT-5, o-series reasoning models) reject `max_tokens`
+# (require `max_completion_tokens`) and only accept the default temperature.
+_NEXTGEN_PREFIXES = ("openai/gpt-5", "openai/o1", "openai/o3", "openai/o4")
+
+
+def _is_nextgen(model: str) -> bool:
+    m = (model or "").lower()
+    return any(m.startswith(p) for p in _NEXTGEN_PREFIXES)
+
 
 class GitHubModelsProvider:
     name = "github"
@@ -46,9 +55,15 @@ class GitHubModelsProvider:
         body: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        if _is_nextgen(self.model):
+            # GPT-5 / o-series: token budget uses a different key and these
+            # reasoning models only support the default temperature. Reasoning
+            # tokens count against the budget, so give it generous headroom.
+            body["max_completion_tokens"] = max(max_tokens, 4096)
+        else:
+            body["max_tokens"] = max_tokens
+            body["temperature"] = temperature
         if tools:
             body["tools"] = [_tool_to_openai(t) for t in tools]
             body["tool_choice"] = "auto"

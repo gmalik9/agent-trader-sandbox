@@ -14,6 +14,42 @@ def _make(transport, token="t"):
                                   client=client)
 
 
+def _make_model(transport, model, token="t"):
+    client = httpx.Client(transport=transport)
+    return GitHubModelsProvider(token=token, model=model,
+                                  endpoint="https://example/v1/chat/completions",
+                                  client=client)
+
+
+def test_legacy_model_uses_max_tokens_and_temperature():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    prov = _make_model(httpx.MockTransport(handler), "openai/gpt-4o-mini")
+    prov.chat([{"role": "user", "content": "hi"}], temperature=0.3, max_tokens=500)
+    assert captured["body"]["max_tokens"] == 500
+    assert captured["body"]["temperature"] == 0.3
+    assert "max_completion_tokens" not in captured["body"]
+
+
+def test_nextgen_model_uses_max_completion_tokens_no_temperature():
+    captured = {}
+
+    def handler(request):
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    prov = _make_model(httpx.MockTransport(handler), "openai/gpt-5")
+    prov.chat([{"role": "user", "content": "hi"}], temperature=0.3, max_tokens=500)
+    # GPT-5 / o-series: token budget key differs and temperature is omitted.
+    assert "max_tokens" not in captured["body"]
+    assert "temperature" not in captured["body"]
+    assert captured["body"]["max_completion_tokens"] >= 500
+
+
 def test_request_shape_and_auth_header():
     captured = {}
 
