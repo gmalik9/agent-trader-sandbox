@@ -69,15 +69,32 @@ def pnl_by_symbol(conn: sqlite3.Connection, account_id: int,
         mark = marks.get(sym, s["avg_cost"])
         unrealized = s["qty"] * (mark - s["avg_cost"]) if s["qty"] > 0 else 0.0
         net = s["realized"] + unrealized - s["fees"]
+        open_qty = s["qty"]
+        cost_basis = open_qty * s["avg_cost"] if open_qty > 0 else 0.0
+        market_value = open_qty * mark if open_qty > 0 else 0.0
+        # Human-readable position status.
+        if open_qty > 1e-9:
+            status = "Holding" if s["realized"] == 0.0 else "Holding (partly sold)"
+        else:
+            status = "Closed"
+        # P&L % relative to invested cost basis (open) or realized basis (closed).
+        if open_qty > 1e-9 and cost_basis > 0:
+            pnl_pct = 100.0 * unrealized / cost_basis
+        else:
+            pnl_pct = 0.0
         out.append({
             "symbol": sym,
+            "status": status,
             "realized_pnl": round(s["realized"], 2),
             "unrealized_pnl": round(unrealized, 2),
             "fees": round(s["fees"], 2),
             "net_pnl": round(net, 2),
-            "open_qty": round(s["qty"], 4),
-            "avg_cost": round(s["avg_cost"], 2) if s["qty"] > 0 else 0.0,
-            "mark": round(mark, 2) if s["qty"] > 0 else 0.0,
+            "pnl_pct": round(pnl_pct, 2),
+            "open_qty": round(open_qty, 4),
+            "avg_cost": round(s["avg_cost"], 2) if open_qty > 0 else 0.0,
+            "mark": round(mark, 2) if open_qty > 0 else 0.0,
+            "cost_basis": round(cost_basis, 2),
+            "market_value": round(market_value, 2),
             "trades": int(s["trades"]),
         })
     out.sort(key=lambda d: d["net_pnl"], reverse=True)

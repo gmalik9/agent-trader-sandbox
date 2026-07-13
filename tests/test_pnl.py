@@ -72,6 +72,27 @@ def test_unrealized_uses_latest_mark(tmp_db, acct):
     assert r["unrealized_pnl"] == 100.0      # 4 * (125 - 100)
     assert r["mark"] == 125.0
     assert r["net_pnl"] == 100.0
+    # Extended fields for the readable trades table.
+    assert r["status"] == "Holding"
+    assert r["cost_basis"] == 400.0
+    assert r["market_value"] == 500.0
+    assert r["pnl_pct"] == 25.0              # 100 / 400
+
+
+def test_status_closed_and_partly_sold(tmp_db, acct):
+    t0 = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+    # Fully closed
+    _order(tmp_db, acct, ts=t0.isoformat(), symbol="AAPL", side="buy", qty=10, price=100)
+    _order(tmp_db, acct, ts=(t0 + timedelta(minutes=1)).isoformat(),
+           symbol="AAPL", side="sell", qty=10, price=110)
+    # Partly sold (5 of 10)
+    _order(tmp_db, acct, ts=(t0 + timedelta(minutes=2)).isoformat(),
+           symbol="MSFT", side="buy", qty=10, price=100)
+    _order(tmp_db, acct, ts=(t0 + timedelta(minutes=3)).isoformat(),
+           symbol="MSFT", side="sell", qty=5, price=120)
+    rows = {r["symbol"]: r for r in pnl_mod.pnl_by_symbol(tmp_db, acct)}
+    assert rows["AAPL"]["status"] == "Closed"
+    assert rows["MSFT"]["status"] == "Holding (partly sold)"
 
 
 def test_fees_reduce_net(tmp_db, acct):

@@ -84,6 +84,53 @@ def _aid(name: str) -> int | None:
     return row["id"] if row else None
 
 
+# ---------------- readable time helpers ----------------
+
+def _parse_ts(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _fmt_ts(iso: str | None) -> str:
+    """Human-readable UTC timestamp, e.g. 'Mon, Jul 13 2026 · 4:57 PM UTC'."""
+    dt = _parse_ts(iso)
+    if dt is None:
+        return "—"
+    return dt.strftime("%a, %b %-d %Y · %-I:%M %p UTC")
+
+
+def _humanize_age(iso: str | None) -> str:
+    """Relative age, e.g. '2 min ago', '3 hr ago', 'just now'."""
+    dt = _parse_ts(iso)
+    if dt is None:
+        return "never"
+    secs = (datetime.now(timezone.utc) - dt).total_seconds()
+    if secs < 0:
+        return "just now"
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)} hr ago"
+    return f"{int(secs // 86400)} day(s) ago"
+
+
+def _readable_ts_column(frame: pd.DataFrame, col: str = "ts", new: str = "When") -> pd.DataFrame:
+    """Return a copy with the ISO `col` replaced by a readable `new` column up front."""
+    if frame.empty or col not in frame.columns:
+        return frame
+    out = frame.copy()
+    out.insert(0, new, out[col].map(_fmt_ts))
+    out = out.drop(columns=[col])
+    return out
+
+
 def _enqueue_tick(agent: str) -> None:
     get_writable_conn().execute(
         "INSERT INTO tick_requests(ts, agent, requested_by) VALUES (?, ?, 'ui')",
@@ -117,10 +164,77 @@ def _scheduler_status() -> tuple[str, str]:
     return "Scheduler: not detected", help_text
 
 
+def _market_is_open() -> bool:
+    try:
+        from src.sandbox.clock import is_market_open
+        return bool(is_market_open())
+    except Exception:
+        return False
+
+
+def _agent_activity(agent: str) -> dict:
+    """Recent-activity summary for an agent, for the status panel."""
+    conn = get_writable_conn()
+    last = conn.execute(
+        "SELECT ts, status FROM agent_runs WHERE agent=? ORDER BY id DESC LIMIT 1",
+        (agent,),
+    ).fetchone()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    runs_today = conn.execute(
+        "SELECT COUNT(*) n FROM agent_runs WHERE agent=? AND ts LIKE ?",
+        (agent, f"{today}%"),
+    ).fetchone()["n"]
+    # Trades placed today = filled or routed orders from this agent today.
+    trades_today = conn.execute(
+        "SELECT COUNT(*) n FROM orders WHERE agent=? AND ts LIKE ? "
+        "AND status IN ('filled','routed_external')",
+        (agent, f"{today}%"),
+    ).fetchone()["n"]
+    last_ts = last["ts"] if last else None
+    last_status = last["status"] if last else None
+    # "Active" = a run in the last 15 minutes.
+    dt = _parse_ts(last_ts)
+    active = dt is not None and (datetime.now(timezone.utc) - dt).total_seconds() < 900
+    return {
+        "last_ts": last_ts,
+        "last_status": last_status,
+        "runs_today": runs_today,
+        "trades_today": trades_today,
+        "active": active,
+    }
+
+
+def _render_activity_panel() -> None:
+    """Top-of-page 'is the agent working?' status strip."""
+    mkt = _market_is_open()
+    cols = st.columns([1.2, 1.4, 1.4])
+    with cols[0]:
+        if mkt:
+            st.success("● Market OPEN", icon="🟢")
+        else:
+            st.warning("● Market CLOSED", icon="🔴")
+        st.caption("The day-trader only opens trades while the market is open. "
+                    "The long-term agent can trade any time it runs.")
+    for col, agent, title in ((cols[1], "day", "Day-Trader"),
+                               (cols[2], "long", "Long-Term")):
+        a = _agent_activity(agent)
+        with col:
+            dot = "🟢" if a["active"] else "⚪"
+            state = "running" if a["active"] else "idle"
+            st.markdown(f"**{dot} {title} — {state}**")
+            st.caption(
+                f"Last run: {_humanize_age(a['last_ts'])}"
+                + (f" ({a['last_status']})" if a['last_status'] else "")
+                + f" · {a['runs_today']} runs today · "
+                f"{a['trades_today']} trade(s) placed today"
+            )
+
+
 def _pnl_by_symbol(account_id: int) -> pd.DataFrame:
     rows = pnl_mod.pnl_by_symbol(get_writable_conn(), account_id)
-    cols = ["symbol", "realized_pnl", "unrealized_pnl", "fees", "net_pnl",
-            "open_qty", "avg_cost", "mark", "trades"]
+    cols = ["symbol", "status", "realized_pnl", "unrealized_pnl", "fees",
+            "net_pnl", "pnl_pct", "open_qty", "avg_cost", "mark",
+            "cost_basis", "market_value", "trades"]
     return pd.DataFrame(rows, columns=cols)
 
 
@@ -155,28 +269,45 @@ def _render_pnl_analysis(account_id: int, label: str) -> None:
     m4.metric("Net P&L", f"${net:,.2f}",
               help="Realized + unrealized − fees. The bottom-line total for this account.")
 
-    st.write("**Per-stock P&L**")
+    st.write("**Trades & holdings — per stock**")
+    st.caption("What the agent bought, whether it is still holding or has sold, "
+                "at what price, and the resulting profit or loss.")
     st.dataframe(
         pnl, use_container_width=True, hide_index=True,
         column_config={
             "symbol": st.column_config.TextColumn("Symbol", help="Ticker."),
-            "realized_pnl": st.column_config.NumberColumn(
-                "Realized", format="$%.2f", help="Locked-in P&L from sold quantity."),
+            "status": st.column_config.TextColumn(
+                "Status", help="'Holding' = still open, 'Holding (partly sold)' = some "
+                               "sold, 'Closed' = fully exited."),
+            "open_qty": st.column_config.NumberColumn(
+                "Shares held", help="Shares still held (0 if fully closed)."),
+            "avg_cost": st.column_config.NumberColumn(
+                "Buy price (avg)", format="$%.2f",
+                help="Average price the agent paid for the shares it holds."),
+            "mark": st.column_config.NumberColumn(
+                "Current price", format="$%.2f",
+                help="Latest market price used to value open shares."),
+            "cost_basis": st.column_config.NumberColumn(
+                "Invested", format="$%.2f", help="Money tied up in the open position."),
+            "market_value": st.column_config.NumberColumn(
+                "Current value", format="$%.2f", help="Open shares × current price."),
             "unrealized_pnl": st.column_config.NumberColumn(
-                "Unrealized", format="$%.2f", help="Paper P&L on the still-open quantity."),
+                "Unrealized P&L", format="$%.2f",
+                help="Paper profit/loss on the shares still held."),
+            "pnl_pct": st.column_config.NumberColumn(
+                "P&L %", format="%.2f%%", help="Unrealized P&L as a % of money invested."),
+            "realized_pnl": st.column_config.NumberColumn(
+                "Realized P&L", format="$%.2f", help="Locked-in P&L from shares already sold."),
             "fees": st.column_config.NumberColumn(
                 "Fees", format="$%.2f", help="Fees charged on this symbol's fills."),
             "net_pnl": st.column_config.NumberColumn(
-                "Net", format="$%.2f", help="Realized + unrealized − fees for this symbol."),
-            "open_qty": st.column_config.NumberColumn(
-                "Open qty", help="Shares still held (0 if fully closed)."),
-            "avg_cost": st.column_config.NumberColumn(
-                "Avg cost", format="$%.2f", help="Average cost basis of the open shares."),
-            "mark": st.column_config.NumberColumn(
-                "Mark", format="$%.2f", help="Latest price used to mark open shares."),
+                "Net P&L", format="$%.2f", help="Realized + unrealized − fees for this symbol."),
             "trades": st.column_config.NumberColumn(
                 "Fills", help="Number of filled orders for this symbol."),
         },
+        column_order=["symbol", "status", "open_qty", "avg_cost", "mark",
+                       "cost_basis", "market_value", "unrealized_pnl", "pnl_pct",
+                       "realized_pnl", "fees", "net_pnl", "trades"],
     )
 
     ts = _realized_pnl_timeseries(account_id)
@@ -189,6 +320,83 @@ def _render_pnl_analysis(account_id: int, label: str) -> None:
         fig.update_layout(height=280, margin={"t": 10, "b": 20, "l": 20, "r": 20},
                            yaxis_title="USD")
         st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_reasoning_card(exp: dict) -> None:
+    """Render one agent run as a readable 'why did it trade' card."""
+    icon = {"ok": "✅", "no-op": "➖", "halted": "🛑", "error": "⚠️"}.get(exp["status"], "•")
+    title = (f"{icon} {exp['agent'].title()} agent · {_fmt_ts(exp['ts'])} "
+             f"· {_humanize_age(exp['ts'])}")
+    with st.expander(title, expanded=False):
+        if exp["rationale"]:
+            st.markdown("**Agent's rationale**")
+            st.info(exp["rationale"])
+        else:
+            st.caption("No natural-language rationale recorded for this run.")
+
+        if exp["decisions"]:
+            st.markdown("**Decisions** — what it chose to do and why")
+            dec = pd.DataFrame(exp["decisions"])
+            st.dataframe(
+                dec, use_container_width=True, hide_index=True,
+                column_config={
+                    "symbol": st.column_config.TextColumn("Symbol"),
+                    "action": st.column_config.TextColumn("Action", help="Buy or Sell."),
+                    "qty": st.column_config.NumberColumn("Qty"),
+                    "thesis": st.column_config.TextColumn(
+                        "Why (thesis)", help="The agent's stated reason for this trade.",
+                        width="large"),
+                    "outcome": st.column_config.TextColumn(
+                        "Outcome", help="Whether the trade was placed or skipped by a "
+                                        "risk rule (and why)."),
+                    "accepted": None,
+                },
+                column_order=["symbol", "action", "qty", "thesis", "outcome"],
+            )
+        else:
+            st.caption("No trades were proposed in this run.")
+
+        if exp["data_sources"]:
+            st.markdown("**Data sources considered** — citations behind the decision")
+            src = pd.DataFrame(exp["data_sources"])
+            st.dataframe(
+                src, use_container_width=True, hide_index=True,
+                column_config={
+                    "label": st.column_config.TextColumn(
+                        "Source", help="Which upstream data feed the agent queried."),
+                    "query": st.column_config.TextColumn(
+                        "Query", help="The exact parameters it requested."),
+                    "summary": st.column_config.TextColumn(
+                        "What it returned", help="A summary of the data it received and "
+                                                 "reasoned over.", width="large"),
+                    "tool": None,
+                },
+                column_order=["label", "query", "summary"],
+            )
+        else:
+            st.caption("No upstream data-source calls recorded for this run.")
+
+        if exp["error"]:
+            st.error(f"Error: {exp['error']}")
+
+
+def _render_agent_reasoning(agent: str, *, latest_only: bool = False, limit: int = 10) -> None:
+    """Render readable reasoning cards for an agent's recent runs."""
+    from src.analysis import reasoning as R
+    n = 1 if latest_only else limit
+    rows = get_writable_conn().execute(
+        "SELECT id, ts, agent, status, response, decisions, tools_called, error "
+        "FROM agent_runs WHERE agent=? ORDER BY id DESC LIMIT ?",
+        (agent, n),
+    ).fetchall()
+    st.markdown("### Agent reasoning" if not latest_only else "### Latest agent reasoning")
+    st.caption("Why the agent bought, held, or sold — its rationale, each decision's "
+                "thesis, and the exact data sources it cited.")
+    if not rows:
+        st.info("This agent has not run yet. Trigger a tick to generate reasoning.")
+        return
+    for row in rows:
+        _render_reasoning_card(R.explain_run(row))
 
 
 # ---------------- header ----------------
@@ -220,6 +428,9 @@ tabs = st.tabs(["Overview", "Day-Trader", "Long-Term", "History",
 # ---------------- Overview ----------------
 
 with tabs[0]:
+    st.subheader("Agent activity")
+    _render_activity_panel()
+    st.divider()
     st.subheader("Equity curves")
     eq_day = df(
         "SELECT ts, equity FROM equity_curve WHERE account_id=? ORDER BY ts",
@@ -277,7 +488,17 @@ with tabs[0]:
         "SELECT ts, venue, agent, symbol, side, qty, status, fill_price, fees, dual_group_id "
         "FROM orders ORDER BY ts DESC LIMIT 50"
     )
-    st.dataframe(orders, use_container_width=True, hide_index=True)
+    st.dataframe(
+        _readable_ts_column(orders), use_container_width=True, hide_index=True,
+        column_config={
+            "side": st.column_config.TextColumn("Side", help="buy or sell."),
+            "fill_price": st.column_config.NumberColumn("Fill price", format="$%.2f"),
+            "fees": st.column_config.NumberColumn("Fees", format="$%.2f"),
+            "status": st.column_config.TextColumn(
+                "Status", help="filled = executed on the sandbox; routed_external = sent "
+                               "to Alpaca paper; rejected = blocked by a risk cap or no bar."),
+        },
+    )
 
 
 def _agent_tab(name: str, sub_account: str, mirror: str):
@@ -308,11 +529,21 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
     o = df("SELECT ts, venue, symbol, side, qty, status, fill_price, fees FROM orders "
             "WHERE account_id IN (?, ?) ORDER BY ts DESC LIMIT 50",
             (aid_primary, aid_mirror or -1))
-    st.dataframe(o, use_container_width=True, hide_index=True)
+    st.dataframe(
+        _readable_ts_column(o), use_container_width=True, hide_index=True,
+        column_config={
+            "side": st.column_config.TextColumn("Side"),
+            "fill_price": st.column_config.NumberColumn("Fill price", format="$%.2f"),
+            "fees": st.column_config.NumberColumn("Fees", format="$%.2f"),
+        },
+    )
 
     st.divider()
     if aid_primary:
         _render_pnl_analysis(aid_primary, f"{sub_account} (sandbox)")
+
+    st.divider()
+    _render_agent_reasoning(name, latest_only=True)
 
     if st.button(f"Tick {name} now", key=f"tick_{name}",
                   help=f"Queue one immediate {name} agent run. The scheduler picks it up "
@@ -348,46 +579,66 @@ with tabs[3]:
         paired["slippage_bps"] = (
             (paired["alpaca_fill"] - paired["sandbox_fill"]) / paired["sandbox_fill"] * 10_000
         ).round(2)
-    st.dataframe(paired, use_container_width=True, hide_index=True)
+    st.dataframe(
+        _readable_ts_column(paired), use_container_width=True, hide_index=True,
+        column_config={
+            "sandbox_fill": st.column_config.NumberColumn("Sandbox fill", format="$%.2f"),
+            "alpaca_fill": st.column_config.NumberColumn("Alpaca fill", format="$%.2f"),
+            "slippage_bps": st.column_config.NumberColumn(
+                "Slippage (bps)", help="Difference between the Alpaca and sandbox fill "
+                                       "prices, in basis points."),
+        },
+    )
 
     st.subheader("Divergence log")
     divs = df("SELECT ts, dual_group_id, kind, primary_val, secondary_val, note "
                "FROM dual_divergence ORDER BY ts DESC LIMIT 100")
-    st.dataframe(divs, use_container_width=True, hide_index=True)
+    st.dataframe(_readable_ts_column(divs), use_container_width=True, hide_index=True)
 
 
 # ---------------- Agent Runs ----------------
 
 with tabs[4]:
-    st.subheader("Agent runs")
-    runs = df(
-        "SELECT id, ts, agent, status, latency_ms, error FROM agent_runs "
-        "ORDER BY ts DESC LIMIT 100"
-    )
-    st.dataframe(runs, use_container_width=True, hide_index=True)
-    if not runs.empty:
-        sel = st.number_input("Inspect run id", min_value=int(runs["id"].min()),
-                                max_value=int(runs["id"].max()),
-                                value=int(runs.iloc[0]["id"]),
-                                help="Enter an agent-run id from the table above to see its "
-                                     "full prompt, the LLM's final text, every tool call it "
-                                     "made, the sized/validated decisions, and any error.")
-        detail = df("SELECT prompt, response, tools_called, decisions, error "
-                     "FROM agent_runs WHERE id=?", (int(sel),))
-        if not detail.empty:
-            row = detail.iloc[0]
-            st.write("**Prompt**")
-            st.code(row["prompt"] or "")
-            st.write("**Final text**")
-            st.code(row["response"] or "")
-            for col in ("tools_called", "decisions"):
-                st.write(f"**{col}**")
-                try:
-                    st.json(json.loads(row[col]) if row[col] else {})
-                except Exception:
-                    st.code(row[col] or "")
-            if row["error"]:
-                st.error(row["error"])
+    st.subheader("Agent runs & reasoning")
+    st.caption("Every time an agent runs it records its rationale, the trades it "
+                "decided on, and the exact data it consulted. Expand a card to read why.")
+
+    fcol, ecol = st.columns([2, 1])
+    with fcol:
+        which = st.radio("Show", ["Both", "Day-Trader", "Long-Term"], horizontal=True,
+                          help="Filter the reasoning cards by agent.")
+    with ecol:
+        if st.button("Export reasoning log",
+                      help="Append all reasoning (decisions + cited data sources) to "
+                           "data/reasoning_log.jsonl — a durable dataset for learning "
+                           "from past trades."):
+            try:
+                from scripts.export_reasoning import export
+                n = export()
+                st.success(f"exported {n} new record(s) to data/reasoning_log.jsonl")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"export failed: {e}")
+
+    agent_filter = {"Day-Trader": "day", "Long-Term": "long"}.get(which)
+
+    from src.analysis import reasoning as R
+    if agent_filter:
+        rows = get_writable_conn().execute(
+            "SELECT id, ts, agent, status, response, decisions, tools_called, error "
+            "FROM agent_runs WHERE agent=? ORDER BY id DESC LIMIT 30",
+            (agent_filter,),
+        ).fetchall()
+    else:
+        rows = get_writable_conn().execute(
+            "SELECT id, ts, agent, status, response, decisions, tools_called, error "
+            "FROM agent_runs ORDER BY id DESC LIMIT 30",
+        ).fetchall()
+
+    if not rows:
+        st.info("No agent runs yet.")
+    else:
+        for row in rows:
+            _render_reasoning_card(R.explain_run(row))
 
 
 # ---------------- Settings ----------------

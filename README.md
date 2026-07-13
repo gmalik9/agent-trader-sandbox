@@ -28,6 +28,13 @@ Repo: https://github.com/gmalik9/agent-trader-sandbox
   [`src/analysis/pnl.py`](src/analysis/pnl.py). The sandbox only fills during
   market hours, so to preview the analysis after-hours seed demo trades with
   `python -m scripts.seed_demo_fills` (clear them with `--clear`).
+- **Agent activity & reasoning.** The Overview tab shows whether each agent is
+  running (last run, runs today, trades placed) and if the market is open. The
+  Agent Runs tab renders readable reasoning cards: the agent's rationale, each
+  decision's thesis (why it bought/held/sold), and the exact upstream data
+  sources it cited. Reasoning is persisted in `agent_runs` and can be exported
+  to a durable learning dataset with `python -m scripts.export_reasoning`
+  (writes `data/reasoning_log.jsonl`); see [`src/analysis/reasoning.py`](src/analysis/reasoning.py).
 
 > Paper / simulated only. No live-money path exists in this repo.
 
