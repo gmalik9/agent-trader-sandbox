@@ -98,3 +98,36 @@ def test_learning_records_one_per_decision(tmp_db):
     recs = R.learning_records(tmp_db)
     syms = sorted(r["symbol"] for r in recs)
     assert syms == ["A", "B"]
+
+
+def test_append_run_writes_jsonl(tmp_path):
+    path = tmp_path / "reasoning_log.jsonl"
+    n = R.append_run(
+        run_id=1, ts="2026-07-13T17:00:00+00:00", agent="day", status="ok",
+        response="Bought AAPL and shorted TSLA.",
+        decisions_obj=[
+            {"symbol": "AAPL", "side": "buy", "qty": 10, "thesis": "breakout",
+             "accepted": True},
+            {"symbol": "TSLA", "side": "sell", "qty": 5, "thesis": "breakdown",
+             "accepted": True},
+        ],
+        tools_called_obj=[{"step": 1, "tool_calls": [
+            {"name": "list_intraday_ideas", "args": {},
+             "result": {"rows": [{"symbol": "AAPL"}, {"symbol": "TSLA"}]}}]}],
+        error=None, path=path,
+    )
+    assert n == 2
+    lines = path.read_text().strip().splitlines()
+    assert len(lines) == 2
+    recs = [json.loads(ln) for ln in lines]
+    assert {r["symbol"] for r in recs} == {"AAPL", "TSLA"}
+    assert recs[0]["data_sources"][0]["tool"] == "list_intraday_ideas"
+
+
+def test_append_run_never_raises(tmp_path):
+    # Malformed inputs must not raise (best-effort logging).
+    path = tmp_path / "sub" / "log.jsonl"
+    n = R.append_run(run_id=None, ts="", agent="x", status="ok", response=None,
+                     decisions_obj="not-json", tools_called_obj=None,
+                     error=None, path=path)
+    assert n >= 0

@@ -39,8 +39,15 @@ def build_broker(conn: sqlite3.Connection,
             log.warning("dual requested but no LongTermClient; "
                          "falling back to sandbox-only")
             return SandboxBroker(conn)
-        primary = SandboxBroker(conn)
-        secondary = AlpacaPaperBroker(long_term_client, conn=conn)
-        return DualBroker(primary=primary, secondary=secondary, conn=conn)
+        sandbox = SandboxBroker(conn)
+        alpaca = AlpacaPaperBroker(long_term_client, conn=conn)
+        # `dual_primary` decides which leg is the source of truth for reads /
+        # agent sizing. Default 'alpaca' => "execute on Alpaca whenever possible",
+        # with the sandbox kept as a parallel mirror.
+        if (s.dual_primary or "alpaca").lower() == "sandbox":
+            log.info("dual broker: sandbox primary, alpaca mirror")
+            return DualBroker(primary=sandbox, secondary=alpaca, conn=conn)
+        log.info("dual broker: alpaca primary, sandbox mirror")
+        return DualBroker(primary=alpaca, secondary=sandbox, conn=conn)
 
     raise ValueError(f"unknown BROKER_BACKEND: {backend!r}")

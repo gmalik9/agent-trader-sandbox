@@ -17,24 +17,33 @@ Repo: https://github.com/gmalik9/agent-trader-sandbox
 - **Long-Term Investor agent** consumes recommendations from the sibling
   [long-term-stock-recommender](https://github.com/gmalik9/long-term-stock-recommender) project (via MCP).
 - **Coordinator** splits a configurable bankroll between the two sub-accounts.
-- **DualBroker** (default) executes every order on the local sandbox **and**
-  on Alpaca paper in parallel, so you can compare the agent's local PnL
-  against an independent venue.
+- **DualBroker** (default) executes every order on **Alpaca paper (primary)**
+  and mirrors it to the local sandbox, so trades run on Alpaca whenever the
+  MCP is reachable and you still get a parallel local P&L for comparison. Set
+  `DUAL_PRIMARY=sandbox` to flip which leg is the source of truth; it falls
+  back to sandbox-only when Alpaca is unavailable.
+- **Long & short, leveraged products.** Both venues support shorting (selling
+  to open a negative position) and leveraged/inverse ETFs. The sandbox uses a
+  margin model capped at `MAX_LEVERAGE`× equity. Toggle with `ALLOW_SHORTING`,
+  `ALLOW_LEVERAGED`, `MAX_LEVERAGE` (all paper/simulated only).
 - **Streamlit dashboard** for equity curves, blotter, positions, PnL, and the
   agents' reasoning trace.
 - **Per-agent P&L analysis** (Day-Trader and Long-Term tabs): realized,
-  unrealized, fees and net totals, a per-stock breakdown, and a cumulative
-  realized-P&L chart. Computed with average-cost accounting in
-  [`src/analysis/pnl.py`](src/analysis/pnl.py). The sandbox only fills during
-  market hours, so to preview the analysis after-hours seed demo trades with
-  `python -m scripts.seed_demo_fills` (clear them with `--clear`).
+  unrealized, fees and net totals, a per-stock breakdown (long **and** short),
+  and a cumulative realized-P&L chart. Computed with signed average-cost
+  accounting in [`src/analysis/pnl.py`](src/analysis/pnl.py). The sandbox only
+  fills during market hours, so to preview the analysis after-hours seed demo
+  trades with `python -m scripts.seed_demo_fills` (clear them with `--clear`).
 - **Agent activity & reasoning.** The Overview tab shows whether each agent is
   running (last run, runs today, trades placed) and if the market is open. The
   Agent Runs tab renders readable reasoning cards: the agent's rationale, each
   decision's thesis (why it bought/held/sold), and the exact upstream data
-  sources it cited. Reasoning is persisted in `agent_runs` and can be exported
-  to a durable learning dataset with `python -m scripts.export_reasoning`
-  (writes `data/reasoning_log.jsonl`); see [`src/analysis/reasoning.py`](src/analysis/reasoning.py).
+  sources it cited. **Every** run's reasoning is persisted two ways: in the
+  `agent_runs` table *and* auto-appended to `data/reasoning_log.jsonl` (one
+  JSON line per decision, pairing the reasoning with its cited data) so the
+  full history is always retained as a durable learning dataset. Re-export /
+  backfill anytime with `python -m scripts.export_reasoning`; see
+  [`src/analysis/reasoning.py`](src/analysis/reasoning.py).
 
 > Paper / simulated only. No live-money path exists in this repo.
 

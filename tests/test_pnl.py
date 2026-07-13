@@ -73,7 +73,7 @@ def test_unrealized_uses_latest_mark(tmp_db, acct):
     assert r["mark"] == 125.0
     assert r["net_pnl"] == 100.0
     # Extended fields for the readable trades table.
-    assert r["status"] == "Holding"
+    assert r["status"] == "Long"
     assert r["cost_basis"] == 400.0
     assert r["market_value"] == 500.0
     assert r["pnl_pct"] == 25.0              # 100 / 400
@@ -92,7 +92,7 @@ def test_status_closed_and_partly_sold(tmp_db, acct):
            symbol="MSFT", side="sell", qty=5, price=120)
     rows = {r["symbol"]: r for r in pnl_mod.pnl_by_symbol(tmp_db, acct)}
     assert rows["AAPL"]["status"] == "Closed"
-    assert rows["MSFT"]["status"] == "Holding (partly sold)"
+    assert rows["MSFT"]["status"] == "Long (partly closed)"
 
 
 def test_fees_reduce_net(tmp_db, acct):
@@ -148,3 +148,38 @@ def test_empty_account(tmp_db, acct):
     assert pnl_mod.realized_pnl_timeseries(tmp_db, acct) == []
     assert pnl_mod.totals([]) == {"realized_pnl": 0.0, "unrealized_pnl": 0.0,
                                    "fees": 0.0, "net_pnl": 0.0}
+
+
+def test_short_then_cover_realizes_profit(tmp_db, acct):
+    t0 = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+    # Short 10 @ 100, cover 10 @ 90 → profit of 100.
+    _order(tmp_db, acct, ts=t0.isoformat(), symbol="TSLA", side="sell", qty=10, price=100)
+    _order(tmp_db, acct, ts=(t0 + timedelta(hours=1)).isoformat(),
+           symbol="TSLA", side="buy", qty=10, price=90)
+    rows = pnl_mod.pnl_by_symbol(tmp_db, acct)
+    r = rows[0]
+    assert r["realized_pnl"] == 100.0        # 10 * (100 - 90)
+    assert r["open_qty"] == 0.0
+    assert r["status"] == "Closed"
+
+
+def test_open_short_unrealized(tmp_db, acct):
+    t0 = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+    _order(tmp_db, acct, ts=t0.isoformat(), symbol="NVDA", side="sell", qty=5, price=100)
+    _mark(tmp_db, acct, ts=(t0 + timedelta(hours=1)).isoformat(),
+          symbol="NVDA", qty=-5, avg_cost=100, mark_price=80)
+    r = pnl_mod.pnl_by_symbol(tmp_db, acct)[0]
+    # Short 5 @ 100, mark 80 → unrealized profit 5*(80-100)*sign; qty=-5 so
+    # unrealized = -5 * (80 - 100) = 100.
+    assert r["open_qty"] == -5.0
+    assert r["unrealized_pnl"] == 100.0
+    assert r["status"] == "Short"
+
+
+def test_short_loss_when_price_rises(tmp_db, acct):
+    t0 = datetime(2026, 1, 2, 15, 0, tzinfo=timezone.utc)
+    _order(tmp_db, acct, ts=t0.isoformat(), symbol="AMD", side="sell", qty=10, price=100)
+    _order(tmp_db, acct, ts=(t0 + timedelta(hours=1)).isoformat(),
+           symbol="AMD", side="buy", qty=10, price=115)
+    r = pnl_mod.pnl_by_symbol(tmp_db, acct)[0]
+    assert r["realized_pnl"] == -150.0       # 10 * (100 - 115)

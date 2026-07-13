@@ -41,10 +41,13 @@ Workflow:
   moves.
 - Call `propose_rebalance` once per intended buy/sell with: symbol, side,
   target_weight_pct (0-100, vs sub-account equity), thesis.
+- You MAY use leveraged or inverse ETFs (e.g. SSO, QLD for bullish leverage;
+  SH, PSQ, SQQQ for bearish/hedge exposure) to express conviction or hedge the
+  book when justified.
 Constraints (the runtime enforces these; you do not need to):
-- No single symbol may exceed 25% of equity.
-- No leveraged/inverse ETFs.
-- Sells must close real long positions (no shorting).
+- No single symbol may exceed 25% of equity; total gross exposure is capped by
+  the account's leverage limit.
+- Sells trim or close existing positions.
 If the portfolio is already close to the target, output `no changes` and call
 no tools.
 """

@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     stock_rec_mcp_trading_enabled: str = "true"
     stock_rec_max_order_usd: str = "1000"
     stock_rec_max_symbol_pct: str = "20"
+    # Which leg drives P&L / sizing in the dual broker: 'alpaca' | 'sandbox'.
+    # 'alpaca' means "execute on Alpaca whenever possible" — the sandbox becomes
+    # the mirror. Falls back to sandbox-only when the Alpaca MCP is unavailable.
+    dual_primary: str = Field(default="alpaca")
 
     # Upstream paths
     short_term_trader_path: str = ""
@@ -76,6 +80,11 @@ class Settings(BaseSettings):
     # Sandbox engine knobs
     slippage_bps: float = 2.0
     commission_bps: float = 1.0
+
+    # Trading permissions (paper only). Enabling shorting + leveraged products.
+    allow_shorting: bool = True          # allow selling to open negative positions
+    allow_leveraged: bool = True         # allow leveraged / inverse / vol ETFs
+    max_leverage: float = 2.0            # cap gross exposure at N× account equity
 
 
 @lru_cache(maxsize=1)

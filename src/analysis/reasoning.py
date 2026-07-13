@@ -15,8 +15,12 @@ into a compact, human-readable form for the dashboard and for offline learning.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # Tools that *read* data (as opposed to buffering a proposed trade). Their
 # results are the citations behind a decision.
@@ -152,21 +156,46 @@ def learning_records(conn: sqlite3.Connection, *, limit: int = 1000) -> list[dic
     records: list[dict[str, Any]] = []
     for row in rows:
         exp = explain_run(row)
-        sources = exp["data_sources"]
-        if not exp["decisions"]:
-            # Still record no-trade reasoning — useful negative examples.
-            records.append({
-                "run_id": exp["id"], "ts": exp["ts"], "agent": exp["agent"],
-                "symbol": None, "action": "no_trade", "qty": 0,
-                "thesis": "", "accepted": False,
-                "rationale": exp["rationale"], "data_sources": sources,
-            })
-            continue
-        for d in exp["decisions"]:
-            records.append({
-                "run_id": exp["id"], "ts": exp["ts"], "agent": exp["agent"],
-                "symbol": d["symbol"], "action": d["action"], "qty": d["qty"],
-                "thesis": d["thesis"], "accepted": d["accepted"],
-                "rationale": exp["rationale"], "data_sources": sources,
-            })
+        records.extend(_records_from_explanation(exp))
     return records
+
+
+def _records_from_explanation(exp: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split one explained run into per-decision learning records."""
+    sources = exp["data_sources"]
+    base = {"run_id": exp["id"], "ts": exp["ts"], "agent": exp["agent"],
+            "rationale": exp["rationale"], "data_sources": sources}
+    if not exp["decisions"]:
+        return [{**base, "symbol": None, "action": "no_trade", "qty": 0,
+                 "thesis": "", "accepted": False}]
+    return [{**base, "symbol": d["symbol"], "action": d["action"], "qty": d["qty"],
+             "thesis": d["thesis"], "accepted": d["accepted"]}
+            for d in exp["decisions"]]
+
+
+def append_run(*, run_id: int | None, ts: str, agent: str, status: str,
+               response: str | None, decisions_obj: Any, tools_called_obj: Any,
+               error: str | None, path: Path) -> int:
+    """Append one run's reasoning (per-decision records) to a JSONL log.
+
+    Called on *every* agent run so the full reasoning history is durably stored
+    outside SQLite. Best-effort: never raise into the caller.
+    """
+    try:
+        exp = {
+            "id": run_id, "ts": ts, "agent": agent, "status": status,
+            "rationale": (response or "").strip(),
+            "decisions": decisions(decisions_obj),
+            "data_sources": data_sources(tools_called_obj),
+            "error": error,
+        }
+        records = _records_from_explanation(exp)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+        return len(records)
+    except Exception:  # noqa: BLE001 — logging must never break a trading run
+        log.exception("failed to append reasoning record")
+        return 0
+

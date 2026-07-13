@@ -41,44 +41,70 @@ def pnl_by_symbol(conn: sqlite3.Connection, account_id: int,
     """Per-symbol realized/unrealized/fees/net P&L, sorted by net descending."""
     if marks is None:
         marks = latest_marks(conn, account_id)
+def _apply_fill(s: dict[str, float], side: str, qty: float, price: float) -> None:
+    """Apply one fill to a signed position state, accruing realized P&L.
+
+    Supports long and short positions. `s['qty']` is signed (negative = short),
+    `s['avg_cost']` is the entry price of the currently open side, and
+    `s['realized']` accumulates locked-in P&L (long: sell above cost; short: buy
+    below cost).
+    """
+    signed = qty if side == "buy" else -qty
+    pos = s["qty"]
+    if pos == 0 or (pos > 0) == (signed > 0):
+        # Opening or adding in the same direction → weighted-average cost.
+        new_qty = pos + signed
+        if new_qty != 0:
+            s["avg_cost"] = (s["avg_cost"] * pos + price * signed) / new_qty
+        s["qty"] = new_qty
+        return
+    # Opposite direction → reduce / close / flip and realize.
+    reduce_qty = min(abs(signed), abs(pos))
+    direction = 1.0 if pos > 0 else -1.0  # long realizes (price-cost); short the inverse
+    s["realized"] += reduce_qty * (price - s["avg_cost"]) * direction
+    new_qty = pos + signed
+    if abs(new_qty) <= 1e-9:
+        s["qty"] = 0.0
+        s["avg_cost"] = 0.0
+    elif (new_qty > 0) != (pos > 0):
+        # Flipped through zero → the remainder opens a new position at this price.
+        s["qty"] = new_qty
+        s["avg_cost"] = price
+    else:
+        s["qty"] = new_qty  # partial reduce, basis unchanged
+
+
+def pnl_by_symbol(conn: sqlite3.Connection, account_id: int,
+                  marks: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    """Per-symbol realized/unrealized/fees/net P&L, sorted by net descending."""
+    if marks is None:
+        marks = latest_marks(conn, account_id)
     state: dict[str, dict[str, float]] = {}
     for r in _filled_orders(conn, account_id):
         sym = r["symbol"]
         s = state.setdefault(sym, {"qty": 0.0, "avg_cost": 0.0, "realized": 0.0,
                                     "fees": 0.0, "trades": 0.0})
-        qty = float(r["qty"])
-        price = float(r["fill_price"])
         s["fees"] += float(r["fees"])
         s["trades"] += 1
-        if r["side"] == "buy":
-            new_qty = s["qty"] + qty
-            if new_qty > 0:
-                s["avg_cost"] = (s["avg_cost"] * s["qty"] + price * qty) / new_qty
-            s["qty"] = new_qty
-        else:  # sell
-            sell_qty = min(qty, s["qty"]) if s["qty"] > 0 else 0.0
-            s["realized"] += sell_qty * (price - s["avg_cost"])
-            s["qty"] -= qty
-            if s["qty"] <= 1e-9:
-                s["qty"] = max(s["qty"], 0.0)
-                if s["qty"] == 0.0:
-                    s["avg_cost"] = 0.0
+        _apply_fill(s, r["side"], float(r["qty"]), float(r["fill_price"]))
 
     out: list[dict[str, Any]] = []
     for sym, s in state.items():
         mark = marks.get(sym, s["avg_cost"])
-        unrealized = s["qty"] * (mark - s["avg_cost"]) if s["qty"] > 0 else 0.0
-        net = s["realized"] + unrealized - s["fees"]
         open_qty = s["qty"]
-        cost_basis = open_qty * s["avg_cost"] if open_qty > 0 else 0.0
-        market_value = open_qty * mark if open_qty > 0 else 0.0
+        unrealized = open_qty * (mark - s["avg_cost"]) if abs(open_qty) > 1e-9 else 0.0
+        net = s["realized"] + unrealized - s["fees"]
+        cost_basis = abs(open_qty) * s["avg_cost"] if abs(open_qty) > 1e-9 else 0.0
+        market_value = open_qty * mark if abs(open_qty) > 1e-9 else 0.0
         # Human-readable position status.
         if open_qty > 1e-9:
-            status = "Holding" if s["realized"] == 0.0 else "Holding (partly sold)"
+            status = "Long" if s["realized"] == 0.0 else "Long (partly closed)"
+        elif open_qty < -1e-9:
+            status = "Short" if s["realized"] == 0.0 else "Short (partly covered)"
         else:
             status = "Closed"
-        # P&L % relative to invested cost basis (open) or realized basis (closed).
-        if open_qty > 1e-9 and cost_basis > 0:
+        # P&L % relative to invested/committed cost basis.
+        if abs(open_qty) > 1e-9 and cost_basis > 0:
             pnl_pct = 100.0 * unrealized / cost_basis
         else:
             pnl_pct = 0.0
@@ -91,8 +117,8 @@ def pnl_by_symbol(conn: sqlite3.Connection, account_id: int,
             "net_pnl": round(net, 2),
             "pnl_pct": round(pnl_pct, 2),
             "open_qty": round(open_qty, 4),
-            "avg_cost": round(s["avg_cost"], 2) if open_qty > 0 else 0.0,
-            "mark": round(mark, 2) if open_qty > 0 else 0.0,
+            "avg_cost": round(s["avg_cost"], 2) if abs(open_qty) > 1e-9 else 0.0,
+            "mark": round(mark, 2) if abs(open_qty) > 1e-9 else 0.0,
             "cost_basis": round(cost_basis, 2),
             "market_value": round(market_value, 2),
             "trades": int(s["trades"]),
@@ -109,21 +135,11 @@ def realized_pnl_timeseries(conn: sqlite3.Connection,
     points: list[dict[str, Any]] = []
     for r in _filled_orders(conn, account_id):
         sym = r["symbol"]
-        s = state.setdefault(sym, {"qty": 0.0, "avg_cost": 0.0})
-        qty = float(r["qty"])
-        price = float(r["fill_price"])
+        s = state.setdefault(sym, {"qty": 0.0, "avg_cost": 0.0, "realized": 0.0})
         cum -= float(r["fees"])
-        if r["side"] == "buy":
-            new_qty = s["qty"] + qty
-            if new_qty > 0:
-                s["avg_cost"] = (s["avg_cost"] * s["qty"] + price * qty) / new_qty
-            s["qty"] = new_qty
-        else:
-            sell_qty = min(qty, s["qty"]) if s["qty"] > 0 else 0.0
-            cum += sell_qty * (price - s["avg_cost"])
-            s["qty"] -= qty
-            if s["qty"] <= 1e-9:
-                s["qty"] = max(s["qty"], 0.0)
+        before = s["realized"]
+        _apply_fill(s, r["side"], float(r["qty"]), float(r["fill_price"]))
+        cum += s["realized"] - before
         points.append({"ts": r["ts"], "cum_realized": round(cum, 2)})
     return points
 

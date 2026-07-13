@@ -680,11 +680,18 @@ with tabs[5]:
     st.subheader("Active configuration (read-only)")
     st.json({
         "broker_backend": s.broker_backend,
+        "dual_primary": s.dual_primary,
         "llm_provider": s.llm_provider,
         "llm_model": s.llm_model,
         "capital_total": s.capital_total,
         "split_day_pct": s.split_day_pct,
+        "allow_shorting": s.allow_shorting,
+        "allow_leveraged": s.allow_leveraged,
+        "max_leverage": s.max_leverage,
         "short_term_trader_path": s.short_term_trader_path,
         "stock_recommender_path": s.stock_recommender_path,
         "db": str(db_path()),
     })
+    st.caption("Trading permissions and the dual-broker primary venue are set via "
+                "environment / secrets (`ALLOW_SHORTING`, `ALLOW_LEVERAGED`, "
+                "`MAX_LEVERAGE`, `DUAL_PRIMARY`). Paper/simulated only.")

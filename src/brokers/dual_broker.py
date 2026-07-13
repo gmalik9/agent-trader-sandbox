@@ -98,19 +98,19 @@ class DualBroker(BrokerBase):
             return
 
         group = row["dual_group_id"]
-        for venue, broker in (("sandbox", self.primary), ("alpaca_paper", self.secondary)):
+        for broker in (self.primary, self.secondary):
             r = self.conn.execute(
                 "SELECT id FROM orders WHERE dual_group_id = ? AND venue = ?",
-                (group, venue),
+                (group, broker.name),
             ).fetchone()
             if r:
                 try:
                     broker.cancel_order(int(r["id"]))
                 except Exception:
-                    log.exception("dual cancel: %s leg failed", venue)
+                    log.exception("dual cancel: %s leg failed", broker.name)
                     self._record_divergence(group, "secondary_error",
                                             primary_val="cancel", secondary_val="error",
-                                            note=f"{venue} cancel failed")
+                                            note=f"{broker.name} cancel failed")
 
     def close_position(self, symbol: str, sub_account: str = "day",
                        percentage: float = 100.0) -> OrderResult:

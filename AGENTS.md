@@ -16,10 +16,14 @@ real-money order.** This file documents the guarantees that make that true.
    and has no other backend.
 3. **Kill-switch.** A row in `settings(key='kill_switch', value='on')` halts
    every agent within one tick (≤ 5 s). The Streamlit Overview tab flips it.
-4. **Caps.** Per-order USD cap and per-symbol % of equity cap enforced inside
-   `SandboxBroker` and via the upstream MCP for the Alpaca leg.
-5. **Blocklist.** Leveraged / inverse / volatility ETFs blocked at the
-   broker layer.
+4. **Caps.** Per-order USD cap, per-symbol % of equity cap, and a gross-exposure
+   / leverage cap (`MAX_LEVERAGE`× equity) enforced inside `SandboxBroker` and
+   via the upstream MCP for the Alpaca leg.
+5. **Leveraged products & shorting (paper only).** Shorting and leveraged /
+   inverse ETFs are permitted by default (`ALLOW_SHORTING=true`,
+   `ALLOW_LEVERAGED=true`) and bounded by the leverage cap above. Set either to
+   `false` to restore the long-only / no-leverage blocklist. This changes
+   nothing about guarantee #1 — it is still paper only.
 6. **Audit.** Every order, fill, cash move, and agent run is written to
    `data/sandbox.sqlite`. The Alpaca leg is additionally audited by the
    upstream repo's own SQLite log.

@@ -57,6 +57,9 @@ class SandboxBroker(BrokerBase):
         max_order_usd: float = 25_000.0,
         max_symbol_pct: float = 25.0,
         blocklist: set[str] | None = None,
+        allow_shorting: bool | None = None,
+        allow_leveraged: bool | None = None,
+        max_leverage: float | None = None,
     ) -> None:
         if conn is None:
             conn = dbm.get_conn()
@@ -66,7 +69,17 @@ class SandboxBroker(BrokerBase):
         self.bars = bar_provider or YFinanceBarProvider()
         self.max_order_usd = max_order_usd
         self.max_symbol_pct = max_symbol_pct
-        self.blocklist = blocklist if blocklist is not None else set(DEFAULT_BLOCKLIST)
+        s = get_settings()
+        self.allow_shorting = s.allow_shorting if allow_shorting is None else allow_shorting
+        self.allow_leveraged = s.allow_leveraged if allow_leveraged is None else allow_leveraged
+        self.max_leverage = s.max_leverage if max_leverage is None else max_leverage
+        # The blocklist only applies when leveraged products are disallowed.
+        if blocklist is not None:
+            self.blocklist = blocklist
+        elif self.allow_leveraged:
+            self.blocklist = set()
+        else:
+            self.blocklist = set(DEFAULT_BLOCKLIST)
 
     # ---------- accounts / positions ----------
 
@@ -133,20 +146,37 @@ class SandboxBroker(BrokerBase):
 
         cash, pv = self._equity(aid)
         equity = cash + pv
-        if req.side == "buy" and equity > 0:
-            symbol_pct = 100.0 * notional_est / equity
+
+        current_qty = positions_from_ledger(self.conn, aid).get(symbol)
+        held_qty = current_qty.qty if current_qty else 0.0
+        post_qty = held_qty + (req.qty if req.side == "buy" else -req.qty)
+
+        # No-shorting guard (only when shorting is disabled).
+        if not self.allow_shorting and post_qty < -1e-9:
+            return self._reject(req, reason="shorting_disabled")
+
+        # Per-symbol cap: absolute post-trade exposure vs equity (covers shorts).
+        if equity > 0:
+            post_symbol_notional = abs(post_qty) * ref_price
+            symbol_pct = 100.0 * post_symbol_notional / equity
             if symbol_pct > self.max_symbol_pct:
                 return self._reject(req, reason=f"max_symbol_pct:{self.max_symbol_pct}")
 
-        if req.side == "buy" and notional_est > cash:
-            return self._reject(req, reason="insufficient_cash")
-
-        # No-shorting check: post-fill qty for symbol must be >= 0.
-        current_qty = positions_from_ledger(self.conn, aid).get(symbol)
-        held_qty = current_qty.qty if current_qty else 0.0
-        post = held_qty + (req.qty if req.side == "buy" else -req.qty)
-        if post < -1e-9:
-            return self._reject(req, reason="no_shorting")
+        # Gross-exposure / leverage cap: sum of |position value| across the book,
+        # applying this order, must stay within max_leverage × equity.
+        if equity > 0 and self.max_leverage > 0:
+            positions = positions_from_ledger(self.conn, aid)
+            gross = 0.0
+            for sym, p in positions.items():
+                mark = self._last_mark(aid, sym, fallback=p.avg_cost)
+                if sym == symbol:
+                    gross += abs(post_qty) * ref_price
+                else:
+                    gross += abs(p.qty) * mark
+            if symbol not in positions:
+                gross += abs(post_qty) * ref_price
+            if gross > equity * self.max_leverage + 1e-6:
+                return self._reject(req, reason=f"max_leverage:{self.max_leverage}")
 
         # Try to fill.
         spec = OrderSpec(symbol=symbol, side=req.side, qty=req.qty,
@@ -188,9 +218,17 @@ class SandboxBroker(BrokerBase):
             (aid, now_s, cash_delta, oid),
         )
 
-        # Invariant: cash >= 0 after a buy.
-        new_cash = dbm.get_cash(self.conn, aid)
-        assert new_cash >= -1e-6, f"cash went negative ({new_cash}) after order {oid}"
+        # With margin/shorting enabled, cash may go negative (borrowing) or grow
+        # from short-sale proceeds. Guard against absurd states rather than a hard
+        # cash>=0 rule: equity must remain within the leverage envelope.
+        new_cash, new_pv = self._equity(aid)
+        equity_now = new_cash + new_pv
+        if self.max_leverage > 0 and equity_now > 0:
+            gross = 0.0
+            for sym, p in positions_from_ledger(self.conn, aid).items():
+                gross += abs(p.qty) * self._last_mark(aid, sym, fallback=p.avg_cost)
+            assert gross <= equity_now * self.max_leverage * 1.5 + 1.0, (
+                f"gross exposure {gross:.2f} exceeds leverage envelope after order {oid}")
 
         return OrderResult(id=oid, external_id=None, status="filled",
                            fill_price=fill.fill_price, fees=fill.fees,

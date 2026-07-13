@@ -2,12 +2,19 @@ from src.agents.policy import Decision, validate
 from src.brokers.sandbox_broker import SandboxBroker
 
 
-def test_validate_rejects_blocklist(tmp_db, stub_bars):
+def test_validate_rejects_blocklist_when_leverage_disabled(tmp_db, stub_bars):
     stub_bars.set("TQQQ", o=10, h=11, l=9, c=10)
     b = SandboxBroker(tmp_db, bar_provider=stub_bars)
     d = validate(Decision(symbol="TQQQ", side="buy", qty=10, limit_price=10.0),
-                 b, "day")
+                 b, "day", allow_leveraged=False)
     assert not d.accepted and d.reject_reason == "blocklist"
+
+
+def test_validate_allows_leveraged_by_default(tmp_db, stub_bars):
+    stub_bars.set("TQQQ", o=10, h=11, l=9, c=10)
+    b = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    d = validate(Decision(symbol="TQQQ", side="buy", qty=10, limit_price=10.0), b, "day")
+    assert d.accepted
 
 
 def test_validate_rejects_max_symbol_pct(tmp_db, stub_bars):
@@ -25,7 +32,14 @@ def test_validate_rejects_qty_zero(tmp_db, stub_bars):
     assert not d.accepted and d.reject_reason == "qty<=0"
 
 
-def test_validate_rejects_short_sell(tmp_db, stub_bars):
+def test_validate_rejects_short_sell_when_disabled(tmp_db, stub_bars):
+    b = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    d = validate(Decision(symbol="MSFT", side="sell", qty=10, limit_price=100.0), b, "day",
+                 allow_shorting=False)
+    assert not d.accepted and d.reject_reason == "shorting_disabled"
+
+
+def test_validate_allows_short_sell_by_default(tmp_db, stub_bars):
     b = SandboxBroker(tmp_db, bar_provider=stub_bars)
     d = validate(Decision(symbol="MSFT", side="sell", qty=10, limit_price=100.0), b, "day")
-    assert not d.accepted and d.reject_reason == "no_shorting"
+    assert d.accepted

@@ -49,16 +49,28 @@ def kill_switch_on(conn: sqlite3.Connection, agent: str | None = None) -> bool:
 
 def validate(decision: Decision, broker: BrokerBase, sub_account: str,
              *, max_symbol_pct: float = 25.0, max_order_usd: float = 25_000.0,
-             blocklist: set[str] | None = None) -> Decision:
+             blocklist: set[str] | None = None,
+             allow_shorting: bool | None = None,
+             allow_leveraged: bool | None = None) -> Decision:
+    from src.config import get_settings
+    s = get_settings()
+    allow_shorting = s.allow_shorting if allow_shorting is None else allow_shorting
+    allow_leveraged = s.allow_leveraged if allow_leveraged is None else allow_leveraged
     sym = decision.symbol.upper()
-    blocklist = blocklist if blocklist is not None else DEFAULT_BLOCKLIST
+    # Blocklist only applies when leveraged products are disallowed.
+    if blocklist is not None:
+        active_blocklist = blocklist
+    elif allow_leveraged:
+        active_blocklist = set()
+    else:
+        active_blocklist = set(DEFAULT_BLOCKLIST)
 
     if decision.qty <= 0:
         decision.accepted = False
         decision.reject_reason = "qty<=0"
         return decision
 
-    if sym in blocklist:
+    if sym in active_blocklist:
         decision.accepted = False
         decision.reject_reason = "blocklist"
         return decision
@@ -75,18 +87,18 @@ def validate(decision: Decision, broker: BrokerBase, sub_account: str,
             decision.reject_reason = f"max_order_usd:{max_order_usd}"
             return decision
         acct = broker.get_account(sub_account)
-        if acct.equity > 0 and decision.side == "buy":
+        if acct.equity > 0:
             if 100.0 * notional / acct.equity > max_symbol_pct:
                 decision.accepted = False
                 decision.reject_reason = f"max_symbol_pct:{max_symbol_pct}"
                 return decision
 
-    # No-shorting at the policy layer.
-    if decision.side == "sell":
+    # No-shorting at the policy layer — only when shorting is disabled.
+    if not allow_shorting and decision.side == "sell":
         positions = {p.symbol: p.qty for p in broker.list_positions(sub_account)}
         if positions.get(sym, 0.0) + 1e-9 < decision.qty:
             decision.accepted = False
-            decision.reject_reason = "no_shorting"
+            decision.reject_reason = "shorting_disabled"
             return decision
 
     return decision

@@ -35,16 +35,33 @@ def test_buy_then_sell_round_trip_conserves_cash(tmp_db, stub_bars, monkeypatch)
     assert after.cash == pytest.approx(start - buy.fees - sell.fees, rel=0, abs=1e-6)
 
 
-def test_short_sale_rejected(tmp_db, stub_bars):
+def test_short_sale_allowed_by_default(tmp_db, stub_bars):
     stub_bars.set("AAPL", o=100, h=101, l=99, c=100)
-    b = _broker(tmp_db, stub_bars)
+    b = _broker(tmp_db, stub_bars)  # allow_shorting defaults to True
+    res = b.place_order(OrderRequest("AAPL", "sell", 5, sub_account="day", agent="test"))
+    assert res.status == "filled"
+    # A short shows up as a negative position.
+    pos = {p.symbol: p.qty for p in b.list_positions("day")}
+    assert pos["AAPL"] == pytest.approx(-5.0)
+
+
+def test_short_sale_rejected_when_disabled(tmp_db, stub_bars):
+    stub_bars.set("AAPL", o=100, h=101, l=99, c=100)
+    b = SandboxBroker(conn=tmp_db, bar_provider=stub_bars, allow_shorting=False)
     res = b.place_order(OrderRequest("AAPL", "sell", 5, sub_account="day", agent="test"))
     assert res.status == "rejected"
 
 
-def test_blocklist_rejects(tmp_db, stub_bars):
+def test_leveraged_allowed_by_default(tmp_db, stub_bars):
     stub_bars.set("TQQQ", o=50, h=51, l=49, c=50)
-    b = _broker(tmp_db, stub_bars)
+    b = _broker(tmp_db, stub_bars)  # allow_leveraged defaults to True
+    res = b.place_order(OrderRequest("TQQQ", "buy", 10, sub_account="day", agent="test"))
+    assert res.status == "filled"
+
+
+def test_blocklist_rejects_when_leverage_disabled(tmp_db, stub_bars):
+    stub_bars.set("TQQQ", o=50, h=51, l=49, c=50)
+    b = SandboxBroker(conn=tmp_db, bar_provider=stub_bars, allow_leveraged=False)
     res = b.place_order(OrderRequest("TQQQ", "buy", 10, sub_account="day", agent="test"))
     assert res.status == "rejected"
 

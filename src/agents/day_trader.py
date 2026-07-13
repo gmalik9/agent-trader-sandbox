@@ -44,13 +44,18 @@ DEFAULT_ATR_PCT = 0.02            # 2% fallback ATR when upstream doesn't return
 
 SYSTEM_PROMPT = """You are a disciplined intraday equities trader running on a paper account.
 You see a curated list of intraday ideas and per-symbol quotes. Your job:
-- Identify at most 3 high-conviction long entries from the ideas list.
-- Call `propose_trade` once per intended entry with: symbol, entry_price, stop_price, thesis.
+- Identify at most 3 high-conviction entries from the ideas list. Each may be a
+  LONG (side='buy', profit if price rises) or a SHORT (side='sell', profit if
+  price falls). You MAY also trade leveraged or inverse ETFs (e.g. TQQQ, SQQQ,
+  SOXL) when the setup warrants it.
+- Call `propose_trade` once per intended entry with: symbol, side, entry_price,
+  stop_price, thesis.
+  * For a LONG, the stop_price is BELOW entry_price.
+  * For a SHORT, the stop_price is ABOVE entry_price.
 - Then output a brief one-paragraph rationale.
 Constraints (you do NOT need to enforce these — the runtime will):
 - The runtime sizes positions for 1% account risk via your stop.
-- Max 5 concurrent positions across the book.
-- No shorting, no leveraged/inverse ETFs.
+- Max 5 concurrent positions across the book; gross exposure is capped by leverage.
 - All positions are force-closed by 15:55 ET, so do not open new positions after 15:30 ET.
 If no idea has both a clear setup and a defined stop, output `no trades today` and call no tools.
 """
@@ -61,6 +66,7 @@ class _Proposal:
     symbol: str
     entry_price: float
     stop_price: float
+    side: str = "buy"  # 'buy' (long) | 'sell' (short)
     thesis: str = ""
 
 
@@ -184,10 +190,12 @@ class DayTraderAgent(AgentBase):
             return self.broker.get_account(self.sub_account).__dict__
 
         def propose_trade(*, symbol: str, entry_price: float, stop_price: float,
-                          thesis: str = "") -> dict:
+                          side: str = "buy", thesis: str = "") -> dict:
             proposals.append(_Proposal(symbol=symbol.upper(),
                                          entry_price=float(entry_price),
                                          stop_price=float(stop_price),
+                                         side=("sell" if str(side).lower() in ("sell", "short")
+                                               else "buy"),
                                          thesis=thesis))
             return {"ok": True, "buffered": len(proposals)}
 
@@ -212,12 +220,16 @@ class DayTraderAgent(AgentBase):
                 json_schema={"type": "object"}), fn=account_snapshot),
             ToolHandler(spec=ToolSpec(
                 name="propose_trade",
-                description=("Buffer a long entry proposal. Runtime will size it for "
-                              "1% account risk based on (entry - stop) and place the order."),
+                description=("Buffer an entry proposal. side='buy' opens a long (stop below "
+                              "entry); side='sell' opens a short (stop above entry). Runtime "
+                              "sizes it for 1% account risk based on |entry - stop| and "
+                              "places the order."),
                 json_schema={"type": "object",
                               "required": ["symbol", "entry_price", "stop_price"],
                               "properties": {
                                   "symbol": {"type": "string"},
+                                  "side": {"type": "string", "enum": ["buy", "sell"],
+                                            "default": "buy"},
                                   "entry_price": {"type": "number"},
                                   "stop_price": {"type": "number"},
                                   "thesis": {"type": "string"}}}),
@@ -237,16 +249,25 @@ class DayTraderAgent(AgentBase):
         slots_left = MAX_CONCURRENT_POSITIONS - len(open_syms)
 
         for p in proposals:
-            d = Decision(symbol=p.symbol, side="buy", qty=0.0, thesis=p.thesis)
+            d = Decision(symbol=p.symbol, side=p.side, qty=0.0, thesis=p.thesis)
+            is_short = p.side == "sell"
             if slots_left <= 0 and p.symbol not in open_syms:
                 d.accepted = False
                 d.reject_reason = "max_concurrent_positions"
                 out.append(d)
                 continue
-            risk_per_share = max(p.entry_price - p.stop_price, 1e-6)
-            if risk_per_share >= p.entry_price:
+            # Risk per share = distance to stop. Long: entry>stop. Short: stop>entry.
+            risk_per_share = abs(p.entry_price - p.stop_price)
+            if risk_per_share < 1e-6:
                 d.accepted = False
-                d.reject_reason = "stop_below_zero_or_inverted"
+                d.reject_reason = "stop_equals_entry"
+                out.append(d)
+                continue
+            # For a long the stop must be below entry; for a short, above.
+            if (not is_short and p.stop_price >= p.entry_price) or \
+               (is_short and p.stop_price <= p.entry_price):
+                d.accepted = False
+                d.reject_reason = "stop_on_wrong_side"
                 out.append(d)
                 continue
             risk_budget = acct.equity * ACCOUNT_RISK_PCT

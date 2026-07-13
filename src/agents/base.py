@@ -59,7 +59,24 @@ class AgentBase:
              json.dumps(decisions, default=str) if decisions is not None else None,
              error, latency_ms),
         )
-        return cur.lastrowid
+        rid = cur.lastrowid
+        self._append_reasoning_log(rid, status, response, decisions, tools_called, error)
+        return rid
+
+    def _append_reasoning_log(self, run_id: int, status: str, response: str | None,
+                              decisions: Any, tools_called: Any, error: str | None) -> None:
+        """Durably append this run's reasoning to data/reasoning_log.jsonl."""
+        try:
+            from src.analysis import reasoning as R
+            from src.config import DATA_DIR
+            R.append_run(
+                run_id=run_id, ts=datetime.now(timezone.utc).isoformat(),
+                agent=self.name, status=status, response=response,
+                decisions_obj=decisions, tools_called_obj=tools_called, error=error,
+                path=DATA_DIR / "reasoning_log.jsonl",
+            )
+        except Exception:  # noqa: BLE001 — logging must never break a run
+            log.debug("reasoning append failed", exc_info=True)
 
     def _kill_switched(self) -> bool:
         return kill_switch_on(self.conn, agent=self.name)
