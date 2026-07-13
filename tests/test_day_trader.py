@@ -94,7 +94,8 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     assert out.status == "ok"
     assert any(o["status"] == "filled" and o["symbol"] == "AAPL" for o in out.orders)
     pos = {p.symbol: p.qty for p in broker.list_positions("day")}
-    assert pos.get("AAPL") == 42.0
+    # Sized down to fit the per-order notional cap (default $1000 / $150 ≈ 6 shares).
+    assert pos.get("AAPL") == 6.0
 
 
 class FakeOptions:

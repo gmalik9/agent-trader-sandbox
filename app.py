@@ -140,6 +140,28 @@ def _to_dt(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, format="ISO8601", utc=True)
 
 
+@st.cache_data(ttl=30)
+def _alpaca_account() -> dict | None:
+    """Live Alpaca paper account (cash/equity/buying power), cached 30s.
+
+    Uses the direct paper-only REST client so the UI process doesn't need the
+    MCP subprocess. Returns None if credentials are missing or the call fails.
+    """
+    try:
+        from src.brokers.alpaca_options import AlpacaOptions
+        acct = AlpacaOptions().get_account()
+        return {
+            "cash": float(acct.get("cash", 0) or 0),
+            "equity": float(acct.get("equity", 0) or 0),
+            "buying_power": float(acct.get("buying_power", 0) or 0),
+            "options_buying_power": float(acct.get("options_buying_power", 0) or 0),
+            "account_number": acct.get("account_number", ""),
+            "status": acct.get("status", ""),
+        }
+    except Exception:
+        return None
+
+
 def _enqueue_tick(agent: str) -> None:
     get_writable_conn().execute(
         "INSERT INTO tick_requests(ts, agent, requested_by) VALUES (?, ?, 'ui')",
@@ -252,7 +274,35 @@ def _realized_pnl_timeseries(account_id: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ts", "cum_realized"])
 
 
-def _render_pnl_analysis(account_id: int, label: str) -> None:
+def _latest_reason_by_symbol(account_ids: tuple[int, ...]) -> dict[str, dict]:
+    """Most recent order thesis + timestamp per symbol for the given accounts.
+
+    Powers the 'why did it trade this' column next to each stock. Strips the
+    internal 'reject:'/'alpaca_not_placed:' prefixes so the human-readable
+    thesis shows.
+    """
+    if not account_ids:
+        return {}
+    placeholders = ",".join("?" for _ in account_ids)
+    rows = get_writable_conn().execute(
+        f"SELECT symbol, thesis, ts FROM orders WHERE account_id IN ({placeholders}) "
+        "AND thesis IS NOT NULL ORDER BY id DESC",
+        account_ids,
+    ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        sym = r["symbol"]
+        if sym in out:
+            continue
+        thesis = r["thesis"] or ""
+        if "|" in thesis:  # drop internal reason prefix, keep the human thesis
+            thesis = thesis.split("|", 1)[1] or thesis
+        out[sym] = {"reason": thesis.strip(), "ts": r["ts"]}
+    return out
+
+
+def _render_pnl_analysis(account_id: int, label: str, *,
+                         reason_account_ids: tuple[int, ...] = ()) -> None:
     """Render the P&L analysis block (metrics + per-stock table + chart)."""
     st.markdown("### P&L analysis")
     pnl = _pnl_by_symbol(account_id)
@@ -260,6 +310,11 @@ def _render_pnl_analysis(account_id: int, label: str) -> None:
         st.info("No filled trades yet for this account, so there is no P&L to show. "
                 "Trigger a tick (during market hours for the day trader) to generate fills.")
         return
+
+    # Attach the agent's reasoning + last-traded timestamp per stock.
+    reasons = _latest_reason_by_symbol(reason_account_ids or (account_id,))
+    pnl["reason"] = pnl["symbol"].map(lambda s: reasons.get(s, {}).get("reason", ""))
+    pnl["last_traded"] = pnl["symbol"].map(lambda s: _fmt_ts(reasons.get(s, {}).get("ts")))
 
     realized = float(pnl["realized_pnl"].sum())
     unrealized = float(pnl["unrealized_pnl"].sum())
@@ -280,43 +335,49 @@ def _render_pnl_analysis(account_id: int, label: str) -> None:
 
     st.write("**Trades & holdings — per stock**")
     st.caption("What the agent bought, whether it is still holding or has sold, "
-                "at what price, and the resulting profit or loss.")
+                "at what price, the resulting profit or loss, and *why* it traded "
+                "(its reasoning), with the last-traded time.")
     st.dataframe(
         pnl, use_container_width=True, hide_index=True,
         column_config={
             "symbol": st.column_config.TextColumn("Symbol", help="Ticker."),
             "status": st.column_config.TextColumn(
-                "Status", help="'Holding' = still open, 'Holding (partly sold)' = some "
-                               "sold, 'Closed' = fully exited."),
+                "Status", help="'Long'/'Short' = still open, '...(partly ...)' = partly "
+                               "closed, 'Closed' = fully exited."),
             "open_qty": st.column_config.NumberColumn(
-                "Shares held", help="Shares still held (0 if fully closed)."),
+                "Shares held", help="Signed shares still held (negative = short)."),
             "avg_cost": st.column_config.NumberColumn(
-                "Buy price (avg)", format="$%.2f",
-                help="Average price the agent paid for the shares it holds."),
+                "Entry price (avg)", format="$%.2f",
+                help="Average price the agent entered the open position at."),
             "mark": st.column_config.NumberColumn(
                 "Current price", format="$%.2f",
                 help="Latest market price used to value open shares."),
             "cost_basis": st.column_config.NumberColumn(
-                "Invested", format="$%.2f", help="Money tied up in the open position."),
+                "Invested", format="$%.2f", help="Money committed to the open position."),
             "market_value": st.column_config.NumberColumn(
                 "Current value", format="$%.2f", help="Open shares × current price."),
             "unrealized_pnl": st.column_config.NumberColumn(
                 "Unrealized P&L", format="$%.2f",
-                help="Paper profit/loss on the shares still held."),
+                help="Paper profit/loss on the position still held."),
             "pnl_pct": st.column_config.NumberColumn(
                 "P&L %", format="%.2f%%", help="Unrealized P&L as a % of money invested."),
             "realized_pnl": st.column_config.NumberColumn(
-                "Realized P&L", format="$%.2f", help="Locked-in P&L from shares already sold."),
+                "Realized P&L", format="$%.2f", help="Locked-in P&L from shares already closed."),
             "fees": st.column_config.NumberColumn(
                 "Fees", format="$%.2f", help="Fees charged on this symbol's fills."),
             "net_pnl": st.column_config.NumberColumn(
                 "Net P&L", format="$%.2f", help="Realized + unrealized − fees for this symbol."),
+            "reason": st.column_config.TextColumn(
+                "Why (agent reasoning)", width="large",
+                help="The agent's most recent thesis for trading this stock."),
+            "last_traded": st.column_config.TextColumn(
+                "Last traded", help="When the agent last placed an order in this stock."),
             "trades": st.column_config.NumberColumn(
                 "Fills", help="Number of filled orders for this symbol."),
         },
         column_order=["symbol", "status", "open_qty", "avg_cost", "mark",
                        "cost_basis", "market_value", "unrealized_pnl", "pnl_pct",
-                       "realized_pnl", "fees", "net_pnl", "trades"],
+                       "realized_pnl", "fees", "net_pnl", "reason", "last_traded", "trades"],
     )
 
     ts = _realized_pnl_timeseries(account_id)
@@ -421,6 +482,16 @@ with hdr_l:
                  f"**LLM:** `{s.llm_provider}/{s.llm_model}`   "
                  f"**Capital:** ${s.capital_total:,.0f} "
                  f"({s.split_day_pct:.0f}% day / {100 - s.split_day_pct:.0f}% long)")
+    _acct = _alpaca_account()
+    if _acct is not None:
+        st.markdown(
+            f"**Alpaca paper (live):** cash ${_acct['cash']:,.2f} · "
+            f"equity ${_acct['equity']:,.2f} · buying power ${_acct['buying_power']:,.2f} · "
+            f"options BP ${_acct['options_buying_power']:,.2f}  "
+            f"`{_acct['account_number']}` ({_acct['status']})")
+    else:
+        st.caption("Alpaca paper account not reachable — set ALPACA_API_KEY_ID / "
+                    "ALPACA_SECRET_KEY / ALPACA_PAPER=true to pull live cash.")
 with hdr_r:
     if kill:
         st.error("KILL SWITCH ON")
@@ -520,11 +591,19 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
                    help="Uninvested cash in this sub-account on the local sandbox venue. "
                         "Buys reduce it; sells increase it.")
     with snap_r:
-        if aid_mirror:
+        acct = _alpaca_account()
+        if acct is not None:
+            st.metric("Alpaca cash (live)", f"${acct['cash']:,.2f}",
+                       help=f"Live cash on the Alpaca paper account {acct['account_number']} "
+                            f"(equity ${acct['equity']:,.0f}, buying power "
+                            f"${acct['buying_power']:,.0f}, options BP "
+                            f"${acct['options_buying_power']:,.0f}). Shared across both "
+                            "sub-accounts. Refreshes ~every 30s.")
+        elif aid_mirror:
             cash_m = dbm.get_cash(get_writable_conn(), aid_mirror)
             st.metric(f"{mirror} cash (alpaca)", f"${cash_m:,.2f}",
-                       help="Cash reported for the mirrored Alpaca paper account, when the "
-                            "dual broker is active. Blank if only the sandbox is running.")
+                       help="Alpaca account unavailable — showing the local mirror ledger. "
+                            "Set Alpaca paper keys to pull live cash.")
 
     positions = df(
         "SELECT symbol, qty, avg_cost, mark_price FROM positions_snapshot ps "
@@ -549,7 +628,9 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
 
     st.divider()
     if aid_primary:
-        _render_pnl_analysis(aid_primary, f"{sub_account} (sandbox)")
+        _render_pnl_analysis(aid_primary, f"{sub_account} (sandbox)",
+                              reason_account_ids=tuple(
+                                  a for a in (aid_primary, aid_mirror) if a))
 
     # Options (calls/puts) — routed straight to Alpaca, venue='alpaca_options'.
     opts = df(

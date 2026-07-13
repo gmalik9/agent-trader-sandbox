@@ -35,7 +35,11 @@ from src.mcp_clients.long_term import LongTermClient
 from src.mcp_clients.short_term import ShortTermClient
 from src.sandbox import db as dbm
 from src.sandbox.clock import is_market_open, now_utc
-from src.signals.local import LocalLongTermClient, LocalShortTermClient
+from src.signals.local import (
+    HybridShortTermClient,
+    LocalLongTermClient,
+    LocalShortTermClient,
+)
 
 log = logging.getLogger(__name__)
 LOCK_PATH = DATA_DIR / "scheduler.lock"
@@ -117,14 +121,15 @@ class SchedulerRunner:
             log.warning("no LLM provider configured (%s); LLM-driven ticks will error", e)
             self.provider = None
 
-    def _make_short_term(self) -> ShortTermClient | LocalShortTermClient:
-        """Real short-term MCP client if configured & healthy, else local fallback."""
+    def _make_short_term(self):
+        """Real short-term MCP client (wrapped with a local yfinance fallback for
+        ideas), or the pure local provider if the MCP can't start."""
         if self.settings.short_term_trader_path:
             try:
-                client = ShortTermClient()
-                client.start()
-                log.info("short-term MCP client up")
-                return client
+                real = ShortTermClient()
+                real.start()
+                log.info("short-term MCP client up (hybrid: local yfinance idea fallback)")
+                return HybridShortTermClient(real)
             except Exception as e:
                 log.warning("short-term MCP client failed to start (%s); "
                              "using local yfinance idea provider", e)

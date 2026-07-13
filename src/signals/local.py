@@ -339,3 +339,78 @@ class LocalLongTermClient:
 
     def get_news(self, ticker: str, *, days: int = 7, limit: int = 20) -> dict:
         return {"symbol": ticker.upper(), "news": [], "source": "local-yfinance"}
+
+
+# --------------------------------------------------------------------------- #
+#  Hybrid short-term client: real MCP first, local yfinance fallback
+# --------------------------------------------------------------------------- #
+
+
+class HybridShortTermClient:
+    """Prefer the real short-term MCP scanner, fall back to local yfinance ideas.
+
+    The upstream intraday scanner only returns ideas after a (slow, sometimes
+    empty) scan; when it yields nothing or errors, the day-trader would never
+    trade. This wrapper transparently substitutes the fast local momentum-based
+    idea provider so the agent always has candidates to evaluate.
+    """
+
+    is_hybrid = True
+
+    def __init__(self, real, local: LocalShortTermClient | None = None) -> None:
+        self._real = real
+        self._local = local or LocalShortTermClient()
+
+    def start(self) -> None:
+        try:
+            self._real.start()
+        except Exception:
+            log.warning("hybrid: real short-term client failed to start; local only")
+            self._real = None
+
+    def stop(self) -> None:
+        for c in (self._real, self._local):
+            if c is not None:
+                try:
+                    c.stop()
+                except Exception:
+                    pass
+
+    def health(self) -> bool:
+        return True
+
+    def list_tool_names(self) -> list[str]:
+        return ["list_ideas", "lookup_ticker"]
+
+    def list_ideas(self, *, mode: str = "intraday", tier: str = "A",
+                   limit: int = 10) -> dict:
+        if self._real is not None:
+            try:
+                res = self._real.list_ideas(mode=mode, tier=tier, limit=limit)
+                rows = res.get("rows") or res.get("ideas") or []
+                if rows:
+                    return res
+                log.info("hybrid: MCP scanner returned 0 ideas; using local yfinance ideas")
+            except Exception as e:  # noqa: BLE001
+                log.warning("hybrid: MCP list_ideas failed (%s); using local ideas", e)
+        return self._local.list_ideas(mode=mode, tier=tier, limit=limit)
+
+    def lookup_ticker(self, ticker: str, *, interval: str = "5m",
+                      period: str = "5d") -> dict:
+        if self._real is not None:
+            try:
+                res = self._real.lookup_ticker(ticker, interval=interval, period=period)
+                if res and not res.get("error"):
+                    return res
+            except Exception:
+                pass
+        return self._local.lookup_ticker(ticker, interval=interval, period=period)
+
+    def get_news(self, ticker: str, *, days: int = 1, limit: int = 20) -> dict:
+        if self._real is not None:
+            try:
+                return self._real.get_news(ticker, days=days, limit=limit)
+            except Exception:
+                pass
+        return self._local.get_news(ticker, days=days, limit=limit)
+
