@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 
 ENDPOINT = "https://models.github.ai/inference/chat/completions"
 
+
+class RateLimitError(RuntimeError):
+    """Raised on HTTP 429 / rate-limit so callers can back off or downshift."""
+
 # Newer OpenAI families (GPT-5, o-series reasoning models) reject `max_tokens`
 # (require `max_completion_tokens`) and only accept the default temperature.
 _NEXTGEN_PREFIXES = ("openai/gpt-5", "openai/o1", "openai/o3", "openai/o4")
@@ -77,6 +81,8 @@ class GitHubModelsProvider:
             },
             content=json.dumps(body),
         )
+        if resp.status_code == 429:
+            raise RateLimitError(f"github models 429 (rate limited): {resp.text[:200]}")
         if resp.status_code >= 400:
             raise RuntimeError(f"github models {resp.status_code}: {resp.text[:500]}")
         data = resp.json()

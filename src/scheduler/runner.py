@@ -2,7 +2,8 @@
 
 Jobs (UTC scheduling; market-hour gating is internal to each job):
 - `mtm`        every 1 min — mark-to-market both sub-accounts
-- `day_tick`   every 5 min — DayTraderAgent.run_once
+- `day_tick`   every 1 min — DayTraderAgent.run_once (high-frequency; adaptive
+               model downshifts on throttling)
 - `long_tick`  daily at 21:30 UTC (16:30 ET nominal)
 - `coord_tick` daily at 21:45 UTC; acts only on the first trading week of the month
 - `tick_poll`  every 5s — drains `tick_requests` from the Streamlit UI
@@ -276,7 +277,7 @@ class SchedulerRunner:
 
     def register_jobs(self) -> None:
         self.scheduler.add_job(self.job_mtm, IntervalTrigger(minutes=1), id="mtm")
-        self.scheduler.add_job(self.job_day_tick, IntervalTrigger(minutes=5), id="day_tick")
+        self.scheduler.add_job(self.job_day_tick, IntervalTrigger(minutes=1), id="day_tick")
         self.scheduler.add_job(self.job_long_tick,
                                  CronTrigger(hour=21, minute=30), id="long_tick")
         self.scheduler.add_job(self.job_coord_tick,

@@ -43,6 +43,7 @@ _TOOL_LABEL = {
     "scan_latest": "Latest market scan",
     "market_status": "Market open/close status",
     "list_option_contracts": "Option chain (calls/puts)",
+    "get_news": "News headlines & sentiment",
 }
 
 

@@ -41,8 +41,8 @@ MAX_CONCURRENT_POSITIONS = 5
 ACCOUNT_RISK_PCT = 0.01           # 1% of equity per trade
 DD_HALT_PCT = -2.0                # halt for the day at -2% intraday
 DEFAULT_ATR_PCT = 0.02            # 2% fallback ATR when upstream doesn't return one
-MAX_POSITION_PCT = 0.20           # cap any single position at 20% of equity
-MAX_ORDER_USD = 20_000.0          # hard per-order notional cap (fits venue caps)
+MAX_POSITION_PCT = 0.25           # cap any single position at 25% of equity
+MAX_ORDER_USD = 25_000.0          # hard per-order notional cap (fits venue caps)
 
 # Leveraged / inverse / vol ETFs that the upstream Alpaca MCP hard-blocks. The
 # day agent avoids these for *stock* orders so trades actually land on Alpaca;
@@ -61,19 +61,27 @@ ALPACA_BLOCKED_EQUITIES = frozenset({
     "SH", "DOG", "DXD", "RWM", "PSQ",
 })
 
-SYSTEM_PROMPT = """You are a disciplined intraday equities trader running on a paper account.
+SYSTEM_PROMPT = """You are a disciplined, profit-seeking intraday trader on a paper account.
+Trade like a sharp human day-trader: your objective is to MAXIMIZE the account's
+return today while managing risk. You run about once a minute, so it is fine to
+do nothing on a tick when there is no edge.
 You see a curated list of intraday ideas and per-symbol quotes. Your job:
 - Identify at most 3 high-conviction entries from the ideas list. Each may be a
   LONG (side='buy', profit if price rises) or a SHORT (side='sell', profit if
   price falls). You MAY also trade leveraged or inverse ETFs (e.g. TQQQ, SQQQ,
   SOXL) when the setup warrants it.
+- BEFORE committing, sanity-check each candidate with `get_quote` (price action)
+  and `get_news` (headlines + sentiment aggregated across many sources). Favor
+  entries where the technical setup and the news/sentiment agree; don't fight
+  strong opposing news.
 - Call `propose_trade` once per intended entry with: symbol, side, entry_price,
-  stop_price, thesis.
+  stop_price, thesis. In the thesis, briefly cite the signal(s) and any news /
+  sentiment that informed the trade.
   * For a LONG, the stop_price is BELOW entry_price.
   * For a SHORT, the stop_price is ABOVE entry_price.
 - Then output a brief one-paragraph rationale.
 Constraints (you do NOT need to enforce these — the runtime will):
-- The runtime sizes positions for 1% account risk via your stop.
+- The runtime sizes positions for 1% account risk via your stop and caps notional.
 - Max 5 concurrent positions across the book; gross exposure is capped by leverage.
 - All positions are force-closed by 15:55 ET, so do not open new positions after 15:30 ET.
 You may also express a view with OPTIONS (calls/puts) on Alpaca paper: call
@@ -227,6 +235,12 @@ class DayTraderAgent(AgentBase):
             except Exception as e:
                 return {"error": str(e)}
 
+        def get_news(symbol: str, *, days: int = 2) -> dict:
+            try:
+                return self.short_term.get_news(symbol, days=days, limit=15)
+            except Exception as e:
+                return {"error": str(e)}
+
         def current_positions() -> list[dict]:
             return [p.__dict__ for p in self.broker.list_positions(self.sub_account)]
 
@@ -274,6 +288,16 @@ class DayTraderAgent(AgentBase):
                 description="Get a recent 5m quote/series for a symbol.",
                 json_schema={"type": "object", "required": ["symbol"], "properties": {
                     "symbol": {"type": "string"}}}), fn=get_quote),
+            ToolHandler(spec=ToolSpec(
+                name="get_news",
+                description=("Recent news headlines + VADER sentiment for a symbol, "
+                              "aggregated across Finnhub, Alpha Vantage, Marketaux, NewsAPI, "
+                              "Tiingo, Yahoo, StockTwits, SEC filings and Reddit. Use it to "
+                              "confirm or veto a technical setup with the news/sentiment "
+                              "backdrop."),
+                json_schema={"type": "object", "required": ["symbol"], "properties": {
+                    "symbol": {"type": "string"},
+                    "days": {"type": "integer", "default": 2}}}), fn=get_news),
             ToolHandler(spec=ToolSpec(
                 name="current_positions", description="List currently held day-trading positions.",
                 json_schema={"type": "object"}), fn=current_positions),
