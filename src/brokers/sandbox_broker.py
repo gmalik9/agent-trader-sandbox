@@ -60,6 +60,7 @@ class SandboxBroker(BrokerBase):
         allow_shorting: bool | None = None,
         allow_leveraged: bool | None = None,
         max_leverage: float | None = None,
+        mirror: bool = False,
     ) -> None:
         if conn is None:
             conn = dbm.get_conn()
@@ -67,6 +68,12 @@ class SandboxBroker(BrokerBase):
             dbm.bootstrap_accounts(conn)
         self.conn = conn
         self.bars = bar_provider or YFinanceBarProvider()
+        # Mirror mode: this instance only ever shadows the Alpaca leg in the dual
+        # broker. Alpaca is the source of truth and is ALWAYS more important, so
+        # the mirror must never reject an order Alpaca accepted — all of its
+        # independent risk caps (blocklist, per-order/per-symbol/leverage caps,
+        # shorting guard) are disabled so the two books stay in sync.
+        self.mirror = mirror
         s = get_settings()
         # Caps default to the same env vars that bound the Alpaca leg so the
         # sandbox mirror never rejects an order the Alpaca leg would accept.
@@ -76,6 +83,15 @@ class SandboxBroker(BrokerBase):
                 return float(v)
             except (TypeError, ValueError):
                 return default
+        if mirror:
+            # No independent caps in mirror mode.
+            self.max_order_usd = 0.0
+            self.max_symbol_pct = 0.0
+            self.max_leverage = 0.0
+            self.allow_shorting = True
+            self.allow_leveraged = True
+            self.blocklist = set()
+            return
         self.max_order_usd = (
             _num(s.stock_rec_max_order_usd, 25_000.0) if max_order_usd is None
             else max_order_usd

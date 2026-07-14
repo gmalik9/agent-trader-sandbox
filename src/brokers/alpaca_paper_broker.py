@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -26,6 +27,7 @@ from src.brokers.base import (
     OrderResult,
     Position,
 )
+from src.config import get_settings
 from src.sandbox import db as dbm
 
 log = logging.getLogger(__name__)
@@ -86,14 +88,42 @@ class AlpacaPaperBroker(BrokerBase):
     def _is_trading_disabled(resp: object) -> bool:
         return isinstance(resp, dict) and str(resp.get("blocked") or "") == "trading_disabled"
 
-    def _place_via_mcp(self, req: OrderRequest) -> dict:
-        """Submit through the upstream MCP, self-healing a spurious trading gate.
+    @staticmethod
+    def _resp_reason(resp: object) -> str:
+        if not isinstance(resp, dict):
+            return ""
+        return str(resp.get("blocked") or resp.get("error") or "").lower()
 
-        A long-lived MCP client occasionally returns a `trading_disabled` block
-        even though the subprocess env has `STOCK_REC_MCP_TRADING_ENABLED=true`
-        (a freshly-spawned client always succeeds). When that happens we restart
-        the MCP client once and retry, which reliably clears the false block.
+    # Reject reasons that a retry cannot fix — the venue will refuse them every
+    # time (bad symbol, not shortable, insufficient funds, cap breaches). We do
+    # NOT retry these; everything else transient (trading_disabled, transport
+    # errors, empty responses) is retried with backoff.
+    _PERMANENT_MARKERS = (
+        "cannot be sold short", "not shortable", "insufficient", "buying power",
+        "sandbox_violation", "cap", "forbidden", "invalid", "unprocessable",
+        "not tradable", "not_tradable", "asset", "422",
+    )
+
+    def _is_permanent_reject(self, resp: object) -> bool:
+        reason = self._resp_reason(resp)
+        return any(m in reason for m in self._PERMANENT_MARKERS)
+
+    def _place_via_mcp(self, req: OrderRequest) -> dict:
+        """Submit through the upstream MCP, retrying TRANSIENT failures.
+
+        Alpaca is the more important leg, so we work hard to land the order:
+          - `trading_disabled` (a spurious block from a degraded long-lived MCP
+            client) → restart the MCP client and retry.
+          - transport exceptions / empty or id-less responses → retry with
+            exponential backoff.
+          - a genuinely permanent reject (not shortable, insufficient funds, cap,
+            bad symbol) → return immediately; retrying can't help.
         """
+        s = get_settings()
+        max_attempts = max(1, int(getattr(s, "alpaca_max_retries", 4) or 1))
+        backoff = float(getattr(s, "alpaca_retry_backoff", 1.0) or 1.0)
+        cap = float(getattr(s, "alpaca_retry_cap", 6.0) or 6.0)
+
         def _call() -> dict:
             return self.mcp.place_order(
                 symbol=req.symbol.upper(), qty=req.qty, side=req.side,
@@ -101,21 +131,42 @@ class AlpacaPaperBroker(BrokerBase):
                 limit_price=req.limit_price,
             )
 
-        resp = _call()
-        if self._is_trading_disabled(resp):
-            log.warning("alpaca leg returned spurious trading_disabled; "
-                         "restarting MCP client and retrying once")
+        last_resp: dict = {}
+        for attempt in range(max_attempts):
             try:
-                self.mcp.stop()
+                resp = _call()
             except Exception:
-                log.debug("mcp.stop() during self-heal failed", exc_info=True)
-            try:
-                self.mcp.start()
-            except Exception:
-                log.exception("mcp.start() during self-heal failed")
-                return resp
-            resp = _call()
-        return resp
+                log.warning("alpaca place_order transport error (attempt %d/%d) for %s",
+                             attempt + 1, max_attempts, req.symbol, exc_info=True)
+                resp = {}
+            last_resp = resp if isinstance(resp, dict) else {}
+
+            ext_id = (str(resp.get("order_id") or resp.get("id") or "")
+                      if isinstance(resp, dict) else "")
+            if ext_id and not self._is_trading_disabled(resp):
+                return resp  # success — order accepted by Alpaca
+
+            if self._is_permanent_reject(resp):
+                return resp  # venue will refuse every time; don't waste retries
+
+            # Transient. If it's the spurious trading gate, restart the MCP client
+            # (a fresh client reliably clears it) before retrying.
+            if self._is_trading_disabled(resp):
+                log.warning("alpaca leg trading_disabled (attempt %d/%d); "
+                             "restarting MCP client", attempt + 1, max_attempts)
+                try:
+                    self.mcp.stop()
+                except Exception:
+                    log.debug("mcp.stop() during self-heal failed", exc_info=True)
+                try:
+                    self.mcp.start()
+                except Exception:
+                    log.exception("mcp.start() during self-heal failed")
+            if attempt < max_attempts - 1:
+                time.sleep(min(backoff * (2 ** attempt), cap))
+        log.error("alpaca place_order failed after %d attempts for %s: %s",
+                   max_attempts, req.symbol, str(last_resp)[:160])
+        return last_resp
 
     def place_order(self, req: OrderRequest) -> OrderResult:
         aid = dbm.get_account_id(self.conn, _SUB_TO_ACCOUNT.get(req.sub_account, req.sub_account))

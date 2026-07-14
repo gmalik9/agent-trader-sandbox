@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # Day-trader cadence. Lower = higher frequency (bounded by the LLM's rate
     # limit). 60s is the safe default for the GitHub Models free tier.
     day_tick_seconds: int = 60
+    # Alpaca leg is the source of truth — retry transient order failures
+    # (spurious trading_disabled, transport errors) before giving up.
+    alpaca_max_retries: int = 4
+    alpaca_retry_backoff: float = 1.0   # seconds, base for exponential backoff
+    alpaca_retry_cap: float = 6.0       # max seconds per retry wait
 
     # Broker
     broker_backend: str = Field(default="dual")  # 'sandbox' | 'alpaca_paper' | 'dual'

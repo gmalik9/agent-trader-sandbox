@@ -85,3 +85,16 @@ def test_insufficient_cash_rejects(tmp_db, stub_bars):
     b = _broker(tmp_db, stub_bars)
     res = b.place_order(OrderRequest("AAPL", "buy", 1_000_000, sub_account="day", agent="test"))
     assert res.status == "rejected"
+
+
+def test_mirror_mode_disables_all_caps(tmp_db, stub_bars):
+    """As the Alpaca mirror, the sandbox must never reject on its own caps —
+    it faithfully records whatever Alpaca accepted so the books stay in sync."""
+    stub_bars.set("TQQQ", o=50, h=51, l=49, c=50)
+    b = SandboxBroker(conn=tmp_db, bar_provider=stub_bars, mirror=True)
+    # A leveraged ETF that the blocklist would refuse, at a notional far beyond
+    # the per-order cap — mirror mode fills it anyway.
+    res = b.place_order(OrderRequest("TQQQ", "buy", 10_000, sub_account="day", agent="test"))
+    assert res.status == "filled"
+    assert b.max_order_usd == 0.0 and b.max_symbol_pct == 0.0 and b.max_leverage == 0.0
+    assert b.blocklist == set()
