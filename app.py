@@ -558,13 +558,24 @@ if _throttle_dt is not None:
     _age_s = (datetime.now(timezone.utc) - _throttle_dt).total_seconds()
     if _age_s < 180:  # throttled within the last 3 minutes → still relevant
         _detail = dbm.get_setting(get_writable_conn(), "llm_throttle_detail") or ""
-        st.warning(
-            f"⚠️ LLM throttled { _humanize_age(_throttled_at) } — the model provider "
-            f"returned HTTP 429 (rate limit), so some ticks were skipped. "
-            f"The agent retries with backoff and downshifts to a fallback model; "
-            f"trading resumes automatically once quota frees up. "
-            f"({_detail})",
-            icon="⚠️")
+        _warn_col, _btn_col = st.columns([5, 1])
+        with _warn_col:
+            st.warning(
+                f"⚠️ LLM throttled { _humanize_age(_throttled_at) } — the model provider "
+                f"returned HTTP 429 (rate limit), so some ticks were skipped. "
+                f"The agent retries with backoff and downshifts to a fallback model; "
+                f"trading resumes automatically once quota frees up. "
+                f"({_detail})",
+                icon="⚠️")
+        with _btn_col:
+            # Manual re-trigger, in addition to the periodic automatic tick, so
+            # the user can retry immediately once quota may have freed up.
+            if st.button("↻ Retry now", key="retry_throttled_day",
+                          type="primary", use_container_width=True,
+                          help="Queue an immediate day-agent run now instead of waiting "
+                               "for the next automatic tick. Useful right after a throttle "
+                               "to retry once the rate limit may have cleared."):
+                _enqueue_tick("day")
 
 st.markdown(
     f"<div style='color:{_pal['text_muted']};font-size:.82rem;margin:6px 0 2px;'>"
