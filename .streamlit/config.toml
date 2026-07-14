@@ -2,3 +2,13 @@
 headless = true
 enableCORS = false
 enableXsrfProtection = true
+
+# Robinhood-style dark default. A light/dark toggle in the header repaints the
+# rest of the app via injected CSS; this base theme avoids a white flash on load.
+[theme]
+base = "dark"
+primaryColor = "#00C805"
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#16181D"
+textColor = "#FFFFFF"
+font = "sans serif"

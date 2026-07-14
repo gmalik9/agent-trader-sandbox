@@ -21,8 +21,19 @@ import streamlit as st
 from src.config import db_path, get_settings
 from src.sandbox import db as dbm
 from src.analysis import pnl as pnl_mod
+from src.ui import theme as rh_theme
 
-st.set_page_config(page_title="Agentic Trader", layout="wide")
+st.set_page_config(page_title="Agentic Trader", layout="wide",
+                   page_icon="📈", initial_sidebar_state="collapsed")
+
+# Robinhood-style theming. The theme value is driven by a toggle in the header;
+# we read it here (top of the script) so the CSS repaints in the same rerun the
+# toggle changes it. Pre-seed session state so the widget starts on it without a
+# default/session_state conflict warning.
+if "rh_theme" not in st.session_state:
+    st.session_state["rh_theme"] = "dark"
+_THEME = st.session_state["rh_theme"]
+st.markdown(rh_theme.inject_css(_THEME), unsafe_allow_html=True)
 
 
 @st.cache_resource
@@ -155,6 +166,7 @@ def _alpaca_account() -> dict | None:
             "equity": float(acct.get("equity", 0) or 0),
             "buying_power": float(acct.get("buying_power", 0) or 0),
             "options_buying_power": float(acct.get("options_buying_power", 0) or 0),
+            "last_equity": float(acct.get("last_equity", 0) or 0),
             "account_number": acct.get("account_number", ""),
             "status": acct.get("status", ""),
         }
@@ -389,6 +401,8 @@ def _render_pnl_analysis(account_id: int, label: str, *,
             mode="lines+markers", name=label, line={"width": 2}))
         fig.update_layout(height=280, margin={"t": 10, "b": 20, "l": 20, "r": 20},
                            yaxis_title="USD")
+        _last = float(ts["cum_realized"].iloc[-1]) if not ts.empty else 0.0
+        rh_theme.style_fig(fig, _THEME, positive=_last >= 0)
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -472,33 +486,74 @@ def _render_agent_reasoning(agent: str, *, latest_only: bool = False, limit: int
 # ---------------- header ----------------
 
 s = get_settings()
-st.title("Agentic Trader — Sandbox")
-st.caption("Paper / simulated only. No live-money path exists.")
+_pal = rh_theme.palette(_THEME)
+
+# Top bar: brand on the left, theme toggle + status on the right.
+brand_l, brand_r = st.columns([3, 1.15])
+with brand_l:
+    st.markdown(
+        "<div style='display:flex;align-items:center;gap:10px;'>"
+        "<span style='font-size:1.7rem;font-weight:800;letter-spacing:-.03em;'>Agentic Trader</span>"
+        f"<span style='color:{_pal['text_muted']};font-weight:600;font-size:.8rem;"
+        "border:1px solid var(--rh-border);border-radius:999px;padding:2px 10px;'>PAPER</span>"
+        "</div>",
+        unsafe_allow_html=True)
+with brand_r:
+    st.segmented_control(
+        "Theme", ["dark", "light"], key="rh_theme",
+        format_func=lambda v: "🌙 Dark" if v == "dark" else "☀️ Light",
+        label_visibility="collapsed")
 
 kill = dbm.get_setting(get_writable_conn(), "kill_switch") == "on"
-hdr_l, hdr_r = st.columns([3, 1])
-with hdr_l:
-    st.markdown(f"**Backend:** `{s.broker_backend}`   "
-                 f"**LLM:** `{s.llm_provider}/{s.llm_model}`   "
-                 f"**Capital:** ${s.capital_total:,.0f} "
-                 f"({s.split_day_pct:.0f}% day / {100 - s.split_day_pct:.0f}% long)")
-    _acct = _alpaca_account()
-    if _acct is not None:
-        st.markdown(
-            f"**Alpaca paper (live):** cash ${_acct['cash']:,.2f} · "
-            f"equity ${_acct['equity']:,.2f} · buying power ${_acct['buying_power']:,.2f} · "
-            f"options BP ${_acct['options_buying_power']:,.2f}  "
-            f"`{_acct['account_number']}` ({_acct['status']})")
-    else:
-        st.caption("Alpaca paper account not reachable — set ALPACA_API_KEY_ID / "
-                    "ALPACA_SECRET_KEY / ALPACA_PAPER=true to pull live cash.")
-with hdr_r:
-    if kill:
-        st.error("KILL SWITCH ON")
-    else:
-        st.success("Kill switch OFF")
-    _sched_status, _sched_help = _scheduler_status()
-    st.caption(_sched_status, help=_sched_help)
+_acct = _alpaca_account()
+
+# Robinhood-style hero: big portfolio value with today's $ / % change.
+if _acct is not None:
+    eq = _acct["equity"]
+    prev = _acct["last_equity"] or eq
+    chg = eq - prev
+    chg_pct = (chg / prev * 100) if prev else 0.0
+    up = chg >= 0
+    col = _pal["green"] if up else _pal["red"]
+    arrow = "▲" if up else "▼"
+    st.markdown(
+        f"<div style='margin:6px 0 2px;color:{_pal['text_muted']};font-weight:600;"
+        "font-size:.8rem;'>Portfolio value · Alpaca paper</div>"
+        f"<div style='font-size:2.6rem;font-weight:800;letter-spacing:-.03em;"
+        f"line-height:1.1;'>${eq:,.2f}</div>"
+        f"<div style='color:{col};font-weight:700;font-size:1rem;margin-top:2px;'>"
+        f"{arrow} ${abs(chg):,.2f} ({chg_pct:+.2f}%) <span style='color:{_pal['text_muted']};"
+        "font-weight:500;'>Today</span></div>",
+        unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 4px;'>"
+        + "".join(
+            f"<span style='background:{_pal['surface']};border:1px solid var(--rh-border);"
+            f"border-radius:999px;padding:5px 12px;font-size:.8rem;color:{_pal['text_muted']};'>"
+            f"<b style='color:{_pal['text']};'>{lbl}</b> {val}</span>"
+            for lbl, val in [
+                ("Cash", f"${_acct['cash']:,.0f}"),
+                ("Buying power", f"${_acct['buying_power']:,.0f}"),
+                ("Options BP", f"${_acct['options_buying_power']:,.0f}"),
+                ("Backend", s.broker_backend),
+                ("LLM", s.llm_model),
+                ("Account", f"{_acct['account_number']} ({_acct['status']})"),
+            ])
+        + "</div>",
+        unsafe_allow_html=True)
+else:
+    st.caption("Alpaca paper account not reachable — set ALPACA_API_KEY_ID / "
+                "ALPACA_SECRET_KEY / ALPACA_PAPER=true to pull live cash.")
+
+# Status strip: kill switch + scheduler.
+_sched_status, _sched_help = _scheduler_status()
+if kill:
+    st.error("🛑 KILL SWITCH ON — agents halted.")
+st.markdown(
+    f"<div style='color:{_pal['text_muted']};font-size:.82rem;margin:6px 0 2px;'>"
+    f"{'🔴 Kill switch ON' if kill else '🟢 Kill switch OFF'} &nbsp;·&nbsp; {_sched_status}</div>",
+    unsafe_allow_html=True)
+st.divider()
 
 
 tabs = st.tabs(["Overview", "Day-Trader", "Long-Term", "History",
@@ -539,6 +594,7 @@ with tabs[0]:
             fig.add_trace(go.Scatter(x=_to_dt(eq["ts"]), y=eq["equity"],
                                        name=label, line={"dash": "dot"}))
     fig.update_layout(height=420, margin={"t": 20, "b": 20, "l": 20, "r": 20})
+    rh_theme.style_fig(fig, _THEME)
     st.plotly_chart(fig, use_container_width=True)
 
     c1, c2, c3 = st.columns(3)
