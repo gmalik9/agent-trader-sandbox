@@ -157,6 +157,24 @@ def test_inverse_substitution_leaves_ordinary_short_untouched(tmp_db, stub_bars)
     assert subbed[0].symbol == "AAPL" and subbed[0].side == "sell"
 
 
+def test_summarize_ideas_ranks_and_flags_news_catalyst():
+    from src.agents.day_trader import _summarize_ideas
+    res = {"rows": [
+        {"ticker": "SOXS", "direction": "long", "tier": "A", "heat_score": 88.5,
+         "signal_tags": "atr_leader,gapper,premarket_mover", "rr": 2.0,
+         "dollar_risk": 250.0, "dollar_gain": 500.0, "entry": 4.6, "stop": 4.5, "target": 4.8},
+        {"ticker": "NVDA", "direction": "long", "tier": "A", "heat_score": 72.0,
+         "signal_tags": "macd_bull_cross,news_spike", "rr": 2.0,
+         "dollar_risk": 250.0, "dollar_gain": 500.0, "entry": 100.0, "stop": 98.0, "target": 104.0},
+    ]}
+    s = _summarize_ideas(res)
+    assert s["count"] == 2
+    assert s["ideas"][0]["ticker"] == "SOXS" and s["ideas"][1]["ticker"] == "NVDA"
+    assert s["ideas"][0]["has_news_catalyst"] is False   # volatility-only
+    assert s["ideas"][1]["has_news_catalyst"] is True    # news_spike fired
+    assert "heat_score" in s["ideas"][0] and "dollar_risk" in s["ideas"][0]
+
+
 def test_summarize_news_aggregates_sentiment():
     from src.agents.day_trader import _summarize_news
     raw = {"ticker": "AAPL", "articles": [

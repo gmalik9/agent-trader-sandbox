@@ -113,17 +113,27 @@ PRE-TRADE CHECKLIST (ALL MUST PASS)
 A setup is tradable only if ALL conditions below are satisfied:
 
 1) TECHNICAL STRUCTURE (required)
+   - Start from `list_intraday_ideas`: it is pre-ranked by a numeric conviction
+     `heat_score` (0-100) that already blends momentum, volume, volatility AND
+     news sentiment (the `news_spike` signal; `has_news_catalyst` flags it).
+   - Prefer higher `heat_score`, tier A, and ideas WITH a news catalyst over a
+     purely volatility-driven name (e.g. a leveraged ETF tagged only
+     `atr_leader,gapper` with no news_spike is a low-quality, high-risk pick).
    - Clear directional thesis (trend continuation, breakout, pullback, reversal, range rejection).
    - Explicit entry trigger (price level/event/confirmation).
    - Explicit invalidation (stop level tied to market structure or ATR).
    - Market structure supports trade (S/R, VWAP/MA context, momentum, volume confirmation).
    - Avoid late/chasing entries after overextension unless strategy explicitly supports it.
+   - Do NOT re-propose a name you already hold or that was already rejected this
+     session; move down the ranked list to the next-best DIFFERENT setup.
 
 2) NEWS / CATALYST ALIGNMENT (required for serious candidates)
    - Call `get_news` for each serious candidate before proposing.
    - `get_news` returns an aggregated `sentiment_score` (−1..+1), a
      `sentiment_label`, bullish/bearish article counts and the top headlines
      across 9 sources. Read it, don't just glance at it.
+   - If the idea's `has_news_catalyst` is false, the ranking is volatility-driven,
+     not news-driven — demand a stronger technical + sentiment confirmation.
    - Identify freshness/materiality: earnings, guidance, analyst actions, M&A, legal/regulatory,
      product launches, macro sensitivity, sector shocks.
    - Do not trade into strong contradictory fresh news.
@@ -371,9 +381,10 @@ class DayTraderAgent(AgentBase):
 
         def list_intraday_ideas(*, tier: str = "A", limit: int = 10) -> dict:
             try:
-                return self.short_term.list_ideas(mode="intraday", tier=tier, limit=limit)
+                res = self.short_term.list_ideas(mode="intraday", tier=tier, limit=limit)
             except Exception as e:
                 return {"error": str(e)}
+            return _summarize_ideas(res)
 
         def get_quote(symbol: str) -> dict:
             try:
@@ -425,7 +436,15 @@ class DayTraderAgent(AgentBase):
         handlers = [
             ToolHandler(spec=ToolSpec(
                 name="list_intraday_ideas",
-                description="List intraday trade ideas from the upstream scanner.",
+                description=("Ranked intraday trade ideas from the upstream scanner. Each "
+                              "idea carries a numeric conviction `heat_score` (0-100) that "
+                              "ALREADY folds in 9-source news sentiment (via the news_spike "
+                              "signal), plus `tier` (A/B/C), `signal_tags` (which scanners "
+                              "fired), `has_news_catalyst` (true if news moved the score), "
+                              "and pre-computed entry/stop/target/rr/dollar_risk. Rank by "
+                              "heat_score and PREFER ideas with a real news catalyst; "
+                              "diversify across the best setups rather than repeating one "
+                              "name."),
                 json_schema={"type": "object", "properties": {
                     "tier": {"type": "string", "enum": ["A", "B", "C"], "default": "A"},
                     "limit": {"type": "integer", "default": 10},
@@ -803,6 +822,47 @@ def _summarize_quote(symbol: str, raw: dict) -> dict:
         "pct_vs_sma20": _rel(price, sma20),
         "source": raw.get("source", "mcp"),
     }
+
+
+def _summarize_ideas(res: dict) -> dict:
+    """Compact, ranked view of upstream intraday ideas for the LLM.
+
+    The upstream scanner already folds 9-source news sentiment into each idea's
+    ``heat_score`` (via its ``news_spike`` catalyst signal, which shows up in
+    ``signal_tags``). We surface the decision-relevant numbers — conviction
+    (``heat_score``), tier, the fired signals, whether a news catalyst is among
+    them, and the pre-computed entry/stop/target/RR/$-risk — sorted by
+    conviction so the agent can rank and DIVERSIFY instead of hammering one name.
+    """
+    if not isinstance(res, dict) or res.get("error"):
+        return {"error": (res or {}).get("error", "no_ideas")}
+    rows = res.get("rows") or res.get("ideas") or []
+    out = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        tags = str(r.get("signal_tags") or "")
+        out.append({
+            "ticker": (r.get("ticker") or r.get("symbol") or "").upper(),
+            "direction": r.get("direction"),
+            "tier": r.get("tier"),
+            "heat_score": r.get("heat_score"),           # 0..100 conviction
+            "signal_tags": tags,                          # scanners that fired
+            "has_news_catalyst": "news_spike" in tags,    # news moved the score
+            "earnings_soon": "earnings_soon" in tags,
+            "entry": r.get("entry"),
+            "stop": r.get("stop"),
+            "target": r.get("target"),
+            "rr": r.get("rr"),
+            "dollar_risk": r.get("dollar_risk"),
+            "dollar_gain": r.get("dollar_gain"),
+        })
+    out.sort(key=lambda x: (x.get("heat_score") or 0), reverse=True)
+    return {"count": len(out), "ideas": out,
+            "note": ("Ranked by heat_score (news sentiment is already folded in via "
+                     "the news_spike signal; has_news_catalyst flags it). Diversify "
+                     "across the best setups — do not repeatedly propose the single "
+                     "top name, especially one with no news catalyst.")}
 
 
 def _summarize_news(symbol: str, raw: dict) -> dict:
