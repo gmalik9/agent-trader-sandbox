@@ -191,6 +191,27 @@ hr, [data-testid="stDivider"] {{ border-color: var(--rh-border) !important; }}
 }}
 [data-testid="stExpander"] summary {{ color: var(--rh-text) !important; }}
 
+/* ---- tooltips (help "?" hovers + widget tooltips) ---- */
+/* These render in a body-level portal, so theme them explicitly. */
+[data-testid="stTooltipContent"],
+[data-baseweb="tooltip"],
+[data-baseweb="popover"] [role="tooltip"],
+div[data-baseweb="tooltip"] > div {{
+  background: {p['surface_2']} !important;
+  color: {p['text']} !important;
+  border: 1px solid {p['border']} !important;
+  border-radius: 10px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35) !important;
+}}
+[data-testid="stTooltipContent"] *,
+[data-baseweb="tooltip"] * {{
+  color: {p['text']} !important;
+  font-family: 'Inter', sans-serif !important;
+}}
+/* tooltip arrow / caret */
+[data-baseweb="tooltip"] [data-baseweb="popover-arrow"],
+[data-baseweb="tooltip"] svg {{ fill: {p['surface_2']} !important; }}
+
 /* ---- plotly container transparency ---- */
 [data-testid="stPlotlyChart"] {{ background: transparent !important; }}
 </style>
