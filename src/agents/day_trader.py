@@ -84,6 +84,37 @@ INVERSE_ETF: dict[str, str] = {
     "TSLL": "TSLQ", "TSLQ": "TSLL", "NVDL": "NVDS", "NVDS": "NVDL",
 }
 
+# Correlation THEMES. Instruments in the same theme track the SAME underlying
+# (e.g. SOXL/SOXS/NVDL all move with semiconductors), so holding several of them
+# is NOT diversification — it's one concentrated bet. We cap total exposure per
+# theme (THEME_MAX_PCT) so the agent can't load the book with correlated names.
+THEME_GROUPS: dict[str, str] = {}
+for _theme, _members in {
+    "semis": ["SOXL", "SOXS", "NVDL", "NVDS", "SMH", "SOXX", "NVDA", "AMD",
+               "LRCX", "ADI", "MRVL", "AVGO", "TSM", "MU", "INTC"],
+    "nasdaq": ["TQQQ", "SQQQ", "QLD", "QID", "QQQ"],
+    "sp500": ["UPRO", "SPXU", "SPXL", "SPXS", "SSO", "SDS", "SPY"],
+    "smallcap": ["TNA", "TZA", "URTY", "SRTY", "IWM"],
+    "tech": ["TECL", "TECS", "XLK", "MSFU", "METU", "AMZU"],
+    "financials": ["FAS", "FAZ", "XLF", "MS", "SPGI"],
+    "biotech": ["LABU", "LABD", "XBI", "BMY", "ABT"],
+    "goldminers": ["NUGT", "DUST", "JNUG", "JDST", "GDX"],
+    "energy": ["ERX", "ERY", "GUSH", "DRIP", "XLE", "COP"],
+    "oil": ["UCO", "SCO", "USO", "BOIL", "KOLD"],
+    "china": ["YINN", "YANG", "FXI"],
+    "treasuries": ["TMF", "TMV", "TLT"],
+    "volatility": ["UVXY", "VXX", "VIXY", "SVXY"],
+    "tesla": ["TSLL", "TSLQ", "TSLA"],
+    "staples": ["XLP", "PLD"],
+}.items():
+    for _m in _members:
+        THEME_GROUPS[_m] = _theme
+
+
+def _theme_of(symbol: str) -> str:
+    """Correlation theme for a symbol, or the symbol itself if standalone."""
+    return THEME_GROUPS.get((symbol or "").upper(), (symbol or "").upper())
+
 SYSTEM_PROMPT = """You are "Atlas-Day", an elite discretionary intraday trader operating a PAPER trading account.
 Your sole objective is to maximize risk-adjusted equity growth TODAY while preserving capital.
 You are invoked approximately once per minute during market hours.
@@ -161,18 +192,24 @@ A setup is tradable only if ALL conditions below are satisfied:
 
 5) PORTFOLIO FIT (required)
    - Check `current_positions` and `account_snapshot`, and read the `portfolio`
-     block returned by `list_intraday_ideas` (idle cash %, names already held,
-     per-name room left).
+     block returned by `list_intraday_ideas` (idle cash %, names held, per-name
+     room, per-THEME exposure, and which names are on cooldown).
    - DIVERSIFY and DEPLOY: if a large share of equity is idle cash, actively put
-     it to work across SEVERAL uncorrelated high-conviction names — do not sit in
-     cash and do not pile into one ticker. Aim to build a book of multiple
-     positions, not a single concentrated bet.
-   - Each idea shows `already_held_pct`, `room_left` and `at_cap`. NEVER re-propose
-     a name with `at_cap=true` (it is already at its ~20% limit and will be
-     rejected); move to the next-best DIFFERENT idea instead.
-   - Avoid concentration (single name, single sector/theme, duplicated beta).
-   - Single-name exposure is auto-capped near 20% of equity; you can hold up to
-     8 concurrent positions — use that room to spread risk.
+     it to work across SEVERAL UNCORRELATED themes — do not sit in cash and do
+     not pile into one ticker or one theme. Aim to build a book of multiple
+     positions across DIFFERENT sectors, not a single concentrated bet.
+   - The idea list only shows TRADABLE names; anything at its per-name cap, at
+     its correlation-theme cap, or on a recently-traded cooldown is already
+     removed. Simply pick the best DIFFERENT names from what's shown.
+   - Correlated instruments are ONE bet, not diversification: SOXL/SOXS/NVDL/SMH
+     all move with semiconductors; UCO/SCO/USO all move with oil. Spread across
+     unrelated themes (e.g. a semis long + an oil short + a financials name).
+   - Each entry must be justified by MULTIPLE factors, not one: technical setup
+     (structure/trigger/stop), news sentiment (`get_news`), analyst view
+     (`get_analyst_view`), volatility/ATR, recent price movement, and R:R.
+   - Single-name exposure is auto-capped near 20% of equity and each theme near
+     35%; you can hold up to 8 concurrent positions — use that room to spread
+     risk across uncorrelated names.
    - Prefer best marginal setup, not merely “another” setup.
 
 ────────────────────────────────────────────────────────────────────────────
@@ -422,20 +459,34 @@ class DayTraderAgent(AgentBase):
                 acct, positions = None, []
             equity = acct.equity if acct else 0.0
             cap_pct = float(getattr(s, "day_max_position_pct", MAX_POSITION_PCT) or 0.20)
+            theme_cap_pct = float(getattr(s, "day_theme_max_pct", 0.35) or 0.0)
             held = {}
+            theme_exposure: dict[str, float] = {}
             for p in positions:
                 if p.qty > 0 and equity > 0:
-                    held[p.symbol.upper()] = 100.0 * abs(p.qty) * (p.mark_price or 0.0) / equity
+                    pct = 100.0 * abs(p.qty) * (p.mark_price or 0.0) / equity
+                    held[p.symbol.upper()] = pct
+                    th = _theme_of(p.symbol)
+                    theme_exposure[th] = theme_exposure.get(th, 0.0) + pct
+            # Names traded very recently are on cooldown — hide them so the agent
+            # rotates into DIFFERENT names instead of hammering one ticker.
+            cooldown = self._recent_traded_symbols()
             ctx = {
                 "equity": round(equity, 2) if equity else None,
                 "cash": round(acct.cash, 2) if acct else None,
                 "pct_cash_idle": round(100.0 * acct.cash / equity, 1) if (acct and equity) else None,
                 "per_name_cap_pct": round(cap_pct * 100, 1),
+                "per_theme_cap_pct": round(theme_cap_pct * 100, 1),
                 "held": {k: round(v, 1) for k, v in held.items()},
+                "theme_exposure_pct": {k: round(v, 1) for k, v in theme_exposure.items()},
+                "on_cooldown": sorted(cooldown),
                 "open_position_count": len(held),
                 "max_positions": MAX_CONCURRENT_POSITIONS,
             }
-            return _summarize_ideas(res, held_pct=held, cap_pct=cap_pct * 100, context=ctx)
+            return _summarize_ideas(res, held_pct=held, cap_pct=cap_pct * 100,
+                                     theme_exposure=theme_exposure,
+                                     theme_cap_pct=theme_cap_pct * 100,
+                                     cooldown=cooldown, context=ctx)
 
         def get_quote(symbol: str) -> dict:
             try:
@@ -665,6 +716,36 @@ class DayTraderAgent(AgentBase):
             return {"error": str(e)}
         return _summarize_analyst(symbol, raw)
 
+    def _recent_traded_symbols(self) -> set[str]:
+        """Symbols this agent placed an order for within the cooldown window.
+
+        Used to hide recently-traded names from the idea list so the agent
+        rotates into DIFFERENT names each tick instead of fixating on one.
+        Includes the inverse counterpart (a short of the inverse hits the same
+        book) so cooldown can't be dodged via substitution.
+        """
+        from src.config import get_settings
+        secs = int(getattr(get_settings(), "day_name_cooldown_seconds", 0) or 0)
+        if secs <= 0:
+            return set()
+        try:
+            rows = self.conn.execute(
+                "SELECT DISTINCT symbol FROM orders WHERE agent=? "
+                "AND submitted_at > datetime('now', ?) "
+                "AND status NOT IN ('rejected','expired','cancelled','canceled')",
+                (self.name, f"-{secs} seconds"),
+            ).fetchall()
+        except Exception:
+            log.debug("recent-traded lookup failed", exc_info=True)
+            return set()
+        out: set[str] = set()
+        for r in rows:
+            sym = str(r["symbol"]).upper()
+            out.add(sym)
+            if sym in INVERSE_ETF:
+                out.add(INVERSE_ETF[sym])
+        return out
+
     def _maybe_substitute_inverse(self, proposals: list[_Proposal]) -> list[_Proposal]:
         """Convert shorts of leveraged/inverse ETFs into longs of their inverse.
 
@@ -730,6 +811,11 @@ class DayTraderAgent(AgentBase):
         # must not block the agent from opening fresh names.
         dust_floor = acct.equity * DUST_POSITION_PCT if acct.equity else 0.0
         material_syms = {sym for sym, n in held_notional.items() if n >= dust_floor}
+        # Current exposure per correlation theme (for the theme cap below).
+        theme_notional: dict[str, float] = {}
+        for sym, n in held_notional.items():
+            theme_notional[_theme_of(sym)] = theme_notional.get(_theme_of(sym), 0.0) + n
+        theme_cap_pct = float(getattr(s, "day_theme_max_pct", 0.0) or 0.0)
         out: list[Decision] = []
         slots_left = MAX_CONCURRENT_POSITIONS - len(material_syms)
 
@@ -741,6 +827,17 @@ class DayTraderAgent(AgentBase):
                 d.reject_reason = "max_concurrent_positions"
                 out.append(d)
                 continue
+            # Correlation-theme cap: don't let one theme (e.g. all semis) exceed
+            # DAY_THEME_MAX_PCT of equity — holding SOXL+NVDL+SMH is one bet, not
+            # diversification. Reject when the theme is already full.
+            theme = _theme_of(p.symbol)
+            if theme_cap_pct > 0 and acct.equity > 0:
+                theme_room = acct.equity * theme_cap_pct - theme_notional.get(theme, 0.0)
+                if theme_room <= acct.equity * 0.005:  # < 0.5% room → treat as full
+                    d.accepted = False
+                    d.reject_reason = f"theme_at_cap:{theme}"
+                    out.append(d)
+                    continue
             # Risk per share = distance to stop. Long: entry>stop. Short: stop>entry.
             risk_per_share = abs(p.entry_price - p.stop_price)
             if risk_per_share < 1e-6:
@@ -783,6 +880,11 @@ class DayTraderAgent(AgentBase):
                     cap_notional = acct.equity * min(sym_pcts)
                     remaining = cap_notional - held_notional.get(p.symbol, 0.0)
                     limits.append(math.floor(max(0.0, remaining) / p.entry_price))
+                # --- correlation-theme cap: bound by remaining theme headroom ---
+                if theme_cap_pct > 0 and acct.equity > 0:
+                    theme_remaining = (acct.equity * theme_cap_pct
+                                        - theme_notional.get(theme, 0.0))
+                    limits.append(math.floor(max(0.0, theme_remaining) / p.entry_price))
                 # --- per-order USD notional cap (venue leg only; 0 => disabled) ---
                 try:
                     order_cap = float(s.stock_rec_max_order_usd)
@@ -800,6 +902,11 @@ class DayTraderAgent(AgentBase):
             d = validate(d, self.broker, self.sub_account)
             if d.accepted and p.symbol not in material_syms:
                 slots_left -= 1
+            if d.accepted and p.entry_price > 0:
+                # Book this fill against the theme so later proposals in the same
+                # tick see the reduced headroom.
+                theme_notional[theme] = (theme_notional.get(theme, 0.0)
+                                          + d.qty * p.entry_price)
             out.append(d)
         return out
 
@@ -897,7 +1004,9 @@ def _summarize_quote(symbol: str, raw: dict) -> dict:
 
 
 def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
-                     cap_pct: float = 20.0, context: dict | None = None) -> dict:
+                     cap_pct: float = 20.0, theme_exposure: dict | None = None,
+                     theme_cap_pct: float = 0.0, cooldown: set | None = None,
+                     context: dict | None = None) -> dict:
     """Compact, ranked view of upstream intraday ideas for the LLM.
 
     The upstream scanner already folds 9-source news sentiment into each idea's
@@ -907,12 +1016,16 @@ def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
     them, and the pre-computed entry/stop/target/RR/$-risk — sorted by
     conviction so the agent can rank and DIVERSIFY instead of hammering one name.
 
-    Each idea is annotated with ``already_held`` / ``room_left`` so the LLM skips
-    names that are already at their per-name cap and deploys idle cash elsewhere.
+    Names are HIDDEN from the tradable list when they are (a) already at their
+    per-name cap, (b) in a correlation theme that's at its theme cap, or (c) on
+    a recently-traded cooldown — so the agent is forced to rotate across
+    uncorrelated names instead of fixating on one.
     """
     if not isinstance(res, dict) or res.get("error"):
         return {"error": (res or {}).get("error", "no_ideas")}
     held_pct = held_pct or {}
+    theme_exposure = theme_exposure or {}
+    cooldown = {str(s).upper() for s in (cooldown or set())}
     rows = res.get("rows") or res.get("ideas") or []
     out = []
     for r in rows:
@@ -929,10 +1042,15 @@ def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
         if direction in ("short", "sell") and sym in INVERSE_ETF:
             effective = INVERSE_ETF[sym]
         cur = held_pct.get(effective, held_pct.get(sym, 0.0))
+        theme = _theme_of(effective)
+        theme_now = theme_exposure.get(theme, 0.0)
+        theme_full = theme_cap_pct > 0 and theme_now >= theme_cap_pct - 0.5
+        on_cd = effective in cooldown or sym in cooldown
         out.append({
             "ticker": sym,
             "direction": r.get("direction"),
             "effective_symbol": effective,
+            "theme": theme,
             "tier": r.get("tier"),
             "heat_score": r.get("heat_score"),           # 0..100 conviction
             "signal_tags": tags,                          # scanners that fired
@@ -947,23 +1065,35 @@ def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
             "already_held_pct": round(cur, 1),
             "room_left": round(max(0.0, cap_pct - cur), 1),   # % of equity still deployable
             "at_cap": cur >= cap_pct - 0.5,
+            "theme_at_cap": theme_full,
+            "on_cooldown": on_cd,
         })
     out.sort(key=lambda x: (x.get("heat_score") or 0), reverse=True)
-    # Hide names that are already at their per-name cap: proposing them just
-    # rounds to zero shares and wastes the tick. Removing them forces the agent
-    # to rotate into fresh names and deploy idle cash instead of re-proposing
-    # the same maxed-out ticker every minute.
-    tradable = [i for i in out if not i["at_cap"]]
-    hidden = [i["ticker"] for i in out if i["at_cap"]]
+    # Hide names blocked for any reason so the agent can't waste a tick on them:
+    #  - at their per-name cap (would round to zero shares)
+    #  - in a correlation theme already at the theme cap (over-concentration)
+    #  - on a recently-traded cooldown (forces rotation to different names)
+    tradable = [i for i in out
+                if not i["at_cap"] and not i["theme_at_cap"] and not i["on_cooldown"]]
+    hidden_cap = [i["ticker"] for i in out if i["at_cap"]]
+    hidden_theme = [i["ticker"] for i in out if i["theme_at_cap"] and not i["at_cap"]]
+    hidden_cd = [i["ticker"] for i in out if i["on_cooldown"] and not i["at_cap"]
+                 and not i["theme_at_cap"]]
     result = {"count": len(tradable), "ideas": tradable,
               "note": ("Ranked by heat_score (news sentiment is already folded in via "
                        "the news_spike signal; has_news_catalyst flags it). These are "
-                       "names with ROOM LEFT — names already at the per-name "
-                       f"~{cap_pct:.0f}% cap have been removed. DIVERSIFY: open NEW "
-                       "positions across several uncorrelated ideas and deploy idle "
-                       "cash; do not sit idle when tradable ideas exist.")}
-    if hidden:
-        result["hidden_at_cap"] = hidden
+                       "the only TRADABLE names — anything at its per-name cap, in a "
+                       "correlation theme already at its cap, or on a recently-traded "
+                       "cooldown has been removed. DIVERSIFY across UNCORRELATED themes "
+                       "and deploy idle cash; base each pick on multiple factors "
+                       "(technical setup, news sentiment, analyst view, volatility, R:R). "
+                       "Do not fixate on one name or theme.")}
+    if hidden_cap:
+        result["hidden_at_name_cap"] = hidden_cap
+    if hidden_theme:
+        result["hidden_theme_at_cap"] = hidden_theme
+    if hidden_cd:
+        result["hidden_on_cooldown"] = hidden_cd
     if context:
         result["portfolio"] = context
     return result

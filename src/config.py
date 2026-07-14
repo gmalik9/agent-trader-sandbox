@@ -106,6 +106,14 @@ class Settings(BaseSettings):
     # ETF) from consuming the whole account under 1%-risk sizing. Set to 0 to
     # disable (not recommended).
     day_max_position_pct: float = 0.20   # ≤20% of equity per single-name entry
+    # Diversification enforcement (mechanical, not just prompt guidance):
+    #  - theme cap: total exposure to one correlation theme (e.g. all semis:
+    #    SOXL/SOXS/NVDL) can't exceed this share of equity — stops the agent
+    #    loading the book with correlated names.
+    #  - cooldown: a name opened/added in the last N seconds is hidden from the
+    #    idea list, forcing the agent to rotate into DIFFERENT names each tick.
+    day_theme_max_pct: float = 0.35      # ≤35% of equity per correlation theme
+    day_name_cooldown_seconds: int = 600  # 10 min per-name cooldown (0 disables)
 
 
 @lru_cache(maxsize=1)

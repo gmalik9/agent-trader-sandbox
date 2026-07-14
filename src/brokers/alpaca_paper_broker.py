@@ -351,6 +351,21 @@ class AlpacaPaperBroker(BrokerBase):
             updated += 1
         if updated:
             log.info("alpaca reconcile: updated %d order row(s)", updated)
+
+        # Age out orders that were routed but never got an external_id (e.g. a
+        # close_position that returned no order id). Without an id they can never
+        # resolve, so after 2 minutes mark them failed rather than leaving them
+        # 'routed_external' forever and skewing the "unresolved" view.
+        stale = self.conn.execute(
+            "UPDATE orders SET status='expired', thesis=COALESCE(thesis,'')||'|reconcile:no_external_id' "
+            "WHERE venue=? AND external_id IS NULL "
+            "AND status IN ('routed_external','pending_new','new','accepted') "
+            "AND submitted_at < datetime('now','-2 minutes')",
+            (self.name,),
+        ).rowcount
+        if stale:
+            log.info("alpaca reconcile: aged out %d stale id-less order(s)", stale)
+            updated += stale
         return updated
 
     def equity_curve(self, sub_account: str = "day",

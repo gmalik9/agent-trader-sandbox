@@ -157,6 +157,36 @@ def test_concentration_cap_is_position_aware(tmp_db, stub_bars, monkeypatch):
     config.get_settings.cache_clear()
 
 
+def test_theme_cap_rejects_over_concentrated_correlated_names(tmp_db, stub_bars, monkeypatch):
+    """Once a correlation theme is full, another name in it is rejected."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("STOCK_REC_MAX_ORDER_USD", "0")
+    monkeypatch.setenv("STOCK_REC_MAX_SYMBOL_PCT", "0")
+    monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
+    monkeypatch.setenv("DAY_THEME_MAX_PCT", "0.35")
+    from src import config
+    config.get_settings.cache_clear()
+
+    # $30k equity, semis theme cap = 35% = $10.5k. Seed SOXL AT the cap.
+    stub_bars.set("SOXL", o=100, h=101, l=99, c=100)
+    stub_bars.set("NVDL", o=50, h=51, l=49, c=50)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars, mirror=True)  # no sandbox caps
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="SOXL", side="buy", qty=105,
+                                     sub_account="day", agent="manual"))  # $10.5k = 35%
+    from src.agents.day_trader import _Proposal, DayTraderAgent
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    # NVDL is the same 'semis' theme → the theme is essentially full → reject.
+    ds = agent._validate_and_size(
+        [_Proposal(symbol="NVDL", entry_price=50.0, stop_price=49.0,
+                    side="buy", thesis="more semis")])
+    assert not ds[0].accepted
+    assert ds[0].reject_reason.startswith("theme_at_cap")
+    config.get_settings.cache_clear()
+
+
 def test_dust_positions_do_not_consume_slots(tmp_db, stub_bars, monkeypatch):
     """Trivial leftover positions (<2% of equity) must not block new names."""
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
@@ -197,7 +227,7 @@ def test_summarize_ideas_annotates_holdings_and_room():
     by = {i["ticker"]: i for i in s["ideas"]}
     # At-cap names are hidden from the tradable list (forces rotation)…
     assert "SOXS" not in by
-    assert s["hidden_at_cap"] == ["SOXS"]
+    assert s["hidden_at_name_cap"] == ["SOXS"]
     # …and names with room remain, annotated.
     assert by["NVDA"]["at_cap"] is False and by["NVDA"]["room_left"] == 20.0
     assert s["count"] == 1
@@ -219,7 +249,30 @@ def test_summarize_ideas_hides_inverse_of_capped_holding():
     tickers = [i["ticker"] for i in s["ideas"]]
     assert "SCO" not in tickers          # short SCO -> long UCO (capped) → hidden
     assert "TECS" in tickers
-    assert "SCO" in s["hidden_at_cap"]
+    assert "SCO" in s["hidden_at_name_cap"]
+
+
+def test_summarize_ideas_hides_theme_at_cap_and_cooldown():
+    """Names in a full correlation theme or on cooldown are hidden."""
+    from src.agents.day_trader import _summarize_ideas
+    res = {"rows": [
+        # semis theme is full (SOXL held via theme_exposure) → NVDL hidden
+        {"ticker": "NVDL", "direction": "long", "tier": "A", "heat_score": 80.0,
+         "signal_tags": "gapper", "rr": 2.0, "entry": 40.0, "stop": 39.0, "target": 42.0},
+        # on cooldown → hidden
+        {"ticker": "AAPL", "direction": "long", "tier": "A", "heat_score": 70.0,
+         "signal_tags": "vwap_reclaim", "rr": 2.0, "entry": 200.0, "stop": 196.0, "target": 208.0},
+        # clean, different theme → tradable
+        {"ticker": "XLE", "direction": "long", "tier": "A", "heat_score": 60.0,
+         "signal_tags": "macd_bull_cross", "rr": 2.0, "entry": 90.0, "stop": 88.0, "target": 94.0},
+    ]}
+    s = _summarize_ideas(res, held_pct={}, cap_pct=20.0,
+                          theme_exposure={"semis": 36.0}, theme_cap_pct=35.0,
+                          cooldown={"AAPL"})
+    tickers = [i["ticker"] for i in s["ideas"]]
+    assert tickers == ["XLE"]
+    assert "NVDL" in s["hidden_theme_at_cap"]
+    assert "AAPL" in s["hidden_on_cooldown"]
 
 
 def test_inverse_substitution_converts_short_leveraged_etf_to_long_inverse(tmp_db, stub_bars):
