@@ -121,15 +121,26 @@ A setup is tradable only if ALL conditions below are satisfied:
 
 2) NEWS / CATALYST ALIGNMENT (required for serious candidates)
    - Call `get_news` for each serious candidate before proposing.
+   - `get_news` returns an aggregated `sentiment_score` (−1..+1), a
+     `sentiment_label`, bullish/bearish article counts and the top headlines
+     across 9 sources. Read it, don't just glance at it.
    - Identify freshness/materiality: earnings, guidance, analyst actions, M&A, legal/regulatory,
      product launches, macro sensitivity, sector shocks.
    - Do not trade into strong contradictory fresh news.
    - Prefer setups where tape + catalyst point in same direction.
 
-3) SENTIMENT CONTEXT (tie-breaker + risk filter)
-   - Use aggregated sentiment from `get_news`.
-   - Favor confirmation (bullish setup + supportive sentiment / bearish setup + negative sentiment).
-   - Be cautious fading crowded extremes unless price confirms reversal.
+3) SENTIMENT & ANALYST CONTEXT (required directional cross-check)
+   - Use the aggregated `sentiment_score` / `sentiment_label` from `get_news`.
+   - Call `get_analyst_view` for each serious candidate: it returns the
+     Wall-Street `rating` (Strong Buy … Strong Sell), consensus `target_price`,
+     `analyst_count`, implied `upside_pct`, and aggregated sentiment.
+   - Use these as a directional filter, NOT a standalone signal:
+     • Do NOT short (or buy the inverse ETF of) a name with a Strong-Buy rating
+       and large positive upside unless the tape strongly contradicts it.
+     • Do NOT buy a name rated Sell/Strong-Sell with negative sentiment and
+       downside to target unless there is a clear catalyst-driven reversal.
+     • Best trades: technical setup, news sentiment AND analyst view all agree.
+   - Favor confirmation; be cautious fading crowded extremes unless price confirms.
 
 4) RISK / REWARD (required)
    - Minimum target expectancy around 2:1 reward:risk.
@@ -139,6 +150,9 @@ A setup is tradable only if ALL conditions below are satisfied:
 5) PORTFOLIO FIT (required)
    - Check `current_positions` and `account_snapshot`.
    - Avoid concentration (single name, single sector/theme, duplicated beta).
+   - Single-name exposure is auto-capped near 20% of equity; do NOT try to load
+     the whole account into one ticker (especially cheap, high-volatility
+     leveraged ETFs) — diversify across uncorrelated setups.
    - Max 5 concurrent positions overall.
    - Prefer best marginal setup, not merely “another” setup.
 
@@ -254,9 +268,10 @@ class DayTraderAgent(AgentBase):
 
     def __init__(self, conn: sqlite3.Connection, broker: BrokerBase,
                  short_term: ShortTermClient, provider: LLMProvider | None = None,
-                 *, now: datetime | None = None, options=None) -> None:
+                 *, now: datetime | None = None, options=None, long_term=None) -> None:
         super().__init__(conn, broker, provider)
         self.short_term = short_term
+        self.long_term = long_term  # LongTermClient | LocalLongTermClient | None
         self._now = now  # injectable for tests
         self.options = options  # AlpacaOptions | None — enables call/put trading
 
@@ -368,10 +383,10 @@ class DayTraderAgent(AgentBase):
             return _summarize_quote(symbol, raw)
 
         def get_news(symbol: str, *, days: int = 2) -> dict:
-            try:
-                return self.short_term.get_news(symbol, days=days, limit=15)
-            except Exception as e:
-                return {"error": str(e)}
+            return self._news(symbol, days=days)
+
+        def get_analyst_view(symbol: str) -> dict:
+            return self._analyst_view(symbol)
 
         def current_positions() -> list[dict]:
             return [p.__dict__ for p in self.broker.list_positions(self.sub_account)]
@@ -426,14 +441,25 @@ class DayTraderAgent(AgentBase):
                     "symbol": {"type": "string"}}}), fn=get_quote),
             ToolHandler(spec=ToolSpec(
                 name="get_news",
-                description=("Recent news headlines + VADER sentiment for a symbol, "
-                              "aggregated across Finnhub, Alpha Vantage, Marketaux, NewsAPI, "
-                              "Tiingo, Yahoo, StockTwits, SEC filings and Reddit. Use it to "
-                              "confirm or veto a technical setup with the news/sentiment "
-                              "backdrop."),
+                description=("Recent news for a symbol with aggregated VADER sentiment, "
+                              "across Finnhub, Alpha Vantage, Marketaux, NewsAPI, Tiingo, "
+                              "Yahoo, StockTwits, SEC filings and Reddit. Returns a "
+                              "sentiment_score (-1..1), sentiment_label, bullish/bearish "
+                              "article counts and the top headlines. Use it to confirm or "
+                              "veto a technical setup with the news/sentiment backdrop."),
                 json_schema={"type": "object", "required": ["symbol"], "properties": {
                     "symbol": {"type": "string"},
                     "days": {"type": "integer", "default": 2}}}), fn=get_news),
+            ToolHandler(spec=ToolSpec(
+                name="get_analyst_view",
+                description=("Analyst consensus and market-sentiment read for a symbol: "
+                              "Wall-Street rating (Strong Buy … Strong Sell), consensus "
+                              "price target, number of covering analysts, implied upside %, "
+                              "plus aggregated news sentiment. Use it as a directional "
+                              "cross-check — e.g. avoid shorting into a Strong-Buy with big "
+                              "upside, or buying into a Sell with negative sentiment."),
+                json_schema={"type": "object", "required": ["symbol"], "properties": {
+                    "symbol": {"type": "string"}}}), fn=get_analyst_view),
             ToolHandler(spec=ToolSpec(
                 name="current_positions", description="List currently held day-trading positions.",
                 json_schema={"type": "object"}), fn=current_positions),
@@ -531,6 +557,37 @@ class DayTraderAgent(AgentBase):
                             "thesis": p.thesis, "accepted": False, "reject_reason": str(e)[:120]})
         return out
 
+    def _news(self, symbol: str, *, days: int = 2) -> dict:
+        """News + aggregated sentiment for a symbol.
+
+        Prefers the stock-recommender leg (9-source news WITH per-article VADER
+        sentiment); falls back to the short-term leg (headlines only) when the
+        long-term client is unavailable or returns nothing.
+        """
+        raw = None
+        if self.long_term is not None:
+            try:
+                raw = self.long_term.get_news(symbol, days=days, limit=20)
+            except Exception:
+                log.debug("long_term.get_news failed for %s", symbol, exc_info=True)
+                raw = None
+        if not raw or raw.get("error") or not (raw.get("articles") or raw.get("news")):
+            try:
+                raw = self.short_term.get_news(symbol, days=days, limit=15)
+            except Exception as e:
+                return {"error": str(e)}
+        return _summarize_news(symbol, raw)
+
+    def _analyst_view(self, symbol: str) -> dict:
+        """Analyst consensus + market-sentiment read from the stock-recommender leg."""
+        if self.long_term is None:
+            return {"error": "analyst_data_unavailable"}
+        try:
+            raw = self.long_term.lookup_ticker(symbol)
+        except Exception as e:
+            return {"error": str(e)}
+        return _summarize_analyst(symbol, raw)
+
     def _maybe_substitute_inverse(self, proposals: list[_Proposal]) -> list[_Proposal]:
         """Convert shorts of leveraged/inverse ETFs into longs of their inverse.
 
@@ -613,29 +670,35 @@ class DayTraderAgent(AgentBase):
                 continue
             risk_budget = acct.equity * ACCOUNT_RISK_PCT
             qty = math.floor(risk_budget / risk_per_share)
-            # Cap by notional so tight stops on cheap/vol names don't produce
-            # absurd share counts. Both caps are configurable; a value of 0
-            # (STOCK_REC_MAX_ORDER_USD / STOCK_REC_MAX_SYMBOL_PCT) disables that
-            # cap so the only sizing limit is the per-trade account risk above.
+            # Bound notional so tight stops on cheap/volatile names can't consume
+            # the account. Two independent limits, whichever is tighter wins:
+            #  1. Agent risk discipline — never put more than DAY_MAX_POSITION_PCT
+            #     of equity into one name per entry (always on; prevents the
+            #     "74% of equity in one $4 ETF" failure mode).
+            #  2. Optional venue caps — STOCK_REC_MAX_ORDER_USD / _MAX_SYMBOL_PCT
+            #     (0 => disabled). These are the paper-broker's hard caps.
             if p.entry_price > 0:
                 limits = [qty]
-                # Per-order USD notional cap. Driven by STOCK_REC_MAX_ORDER_USD
-                # (0 => unlimited); falls back to the local default only when
-                # the setting is missing/unparseable.
+                # --- per-symbol concentration cap ---
+                sym_pcts: list[float] = []
+                day_pct = float(getattr(s, "day_max_position_pct", MAX_POSITION_PCT) or 0)
+                if day_pct > 0:
+                    sym_pcts.append(day_pct)
+                try:
+                    venue_pct = float(s.stock_rec_max_symbol_pct) / 100.0
+                except (TypeError, ValueError):
+                    venue_pct = 0.0
+                if venue_pct > 0:
+                    sym_pcts.append(venue_pct)
+                if sym_pcts:
+                    limits.append(math.floor((acct.equity * min(sym_pcts)) / p.entry_price))
+                # --- per-order USD notional cap (venue leg only; 0 => disabled) ---
                 try:
                     order_cap = float(s.stock_rec_max_order_usd)
                 except (TypeError, ValueError):
-                    order_cap = MAX_ORDER_USD
+                    order_cap = 0.0
                 if order_cap > 0:
                     limits.append(math.floor(order_cap / p.entry_price))
-                # Per-symbol % of equity cap. Driven by STOCK_REC_MAX_SYMBOL_PCT
-                # (0 => unlimited); falls back to the local default otherwise.
-                try:
-                    sym_pct = float(s.stock_rec_max_symbol_pct) / 100.0
-                except (TypeError, ValueError):
-                    sym_pct = MAX_POSITION_PCT
-                if sym_pct > 0:
-                    limits.append(math.floor((acct.equity * sym_pct) / p.entry_price))
                 qty = min(limits)
             if qty <= 0:
                 d.accepted = False
@@ -740,3 +803,83 @@ def _summarize_quote(symbol: str, raw: dict) -> dict:
         "pct_vs_sma20": _rel(price, sma20),
         "source": raw.get("source", "mcp"),
     }
+
+
+def _summarize_news(symbol: str, raw: dict) -> dict:
+    """Condense a get_news payload into headlines + aggregated sentiment.
+
+    Accepts either the stock-recommender shape (``articles`` with per-article
+    ``sentiment: {score,label}``) or the short-term shape (``articles`` with a
+    flat ``sentiment`` float, or none). Produces a compact, decision-ready read:
+    an average sentiment score, a label, bullish/bearish counts and the few
+    most-impactful headlines.
+    """
+    if not isinstance(raw, dict) or raw.get("error"):
+        return {"symbol": symbol.upper(), "error": (raw or {}).get("error", "no_data")}
+    articles = raw.get("articles") or raw.get("news") or []
+    if not articles:
+        return {"symbol": symbol.upper(), "count": 0, "sentiment_label": "no_news",
+                "note": "no recent articles"}
+
+    scored: list[tuple[float, dict]] = []
+    for a in articles:
+        if not isinstance(a, dict):
+            continue
+        sent = a.get("sentiment")
+        score = None
+        if isinstance(sent, dict):
+            score = _f(sent.get("score"))
+        elif isinstance(sent, (int, float)):
+            score = float(sent)
+        elif a.get("sentiment_score") is not None:
+            score = _f(a.get("sentiment_score"))
+        scored.append((score if score is not None else 0.0, a))
+
+    known = [s for s, _ in scored if s != 0.0]
+    avg = round(sum(known) / len(known), 3) if known else 0.0
+    bullish = sum(1 for s, _ in scored if s >= 0.08)
+    bearish = sum(1 for s, _ in scored if s <= -0.08)
+    label = "positive" if avg >= 0.08 else ("negative" if avg <= -0.08 else "neutral")
+
+    def _headline(a: dict) -> str:
+        return str(a.get("headline") or a.get("title") or a.get("summary") or "")[:160]
+
+    top = sorted(scored, key=lambda x: abs(x[0]), reverse=True)[:5]
+    top_headlines = [{"headline": _headline(a), "sentiment": round(s, 3),
+                      "source": a.get("source")} for s, a in top if _headline(a)]
+
+    return {
+        "symbol": symbol.upper(),
+        "count": len(articles),
+        "sentiment_score": avg,          # −1 (very bearish) … +1 (very bullish)
+        "sentiment_label": label,
+        "bullish_articles": bullish,
+        "bearish_articles": bearish,
+        "top_headlines": top_headlines,
+        "source": raw.get("source", "mcp"),
+    }
+
+
+def _summarize_analyst(symbol: str, raw: dict) -> dict:
+    """Condense a lookup_ticker fundamentals payload into an analyst/sentiment read."""
+    if not isinstance(raw, dict) or raw.get("error"):
+        return {"symbol": symbol.upper(), "error": (raw or {}).get("error", "no_data")}
+    price = _f(raw.get("price") or raw.get("last"))
+    target = _f(raw.get("target_price"))
+    upside = _f(raw.get("upside_pct"))
+    if upside is None and price and target:
+        upside = round(100.0 * (target - price) / price, 2)
+    out = {
+        "symbol": symbol.upper(),
+        "price": price,
+        "rating": raw.get("rating"),                 # Strong Buy … Strong Sell | N/A
+        "target_price": target,
+        "analyst_count": raw.get("analyst_count"),
+        "upside_pct": upside,                          # implied upside to target
+        "sentiment_score": _f(raw.get("sentiment_score")),
+        "sentiment_label": raw.get("sentiment_label"),
+        "source": raw.get("source", "mcp"),
+    }
+    # Drop keys the (local) fallback can't provide so the LLM sees a clean read.
+    return {k: v for k, v in out.items() if v is not None}
+

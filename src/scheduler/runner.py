@@ -194,7 +194,8 @@ class SchedulerRunner:
 
     def _day_agent(self) -> DayTraderAgent:
         return DayTraderAgent(self.conn, self.broker, self.short_term,
-                                provider=self.provider, options=self.options)
+                                provider=self.provider, options=self.options,
+                                long_term=self.long_term)
 
     def _long_agent(self) -> LongTermAgent:
         return LongTermAgent(self.conn, self.broker, self.long_term,

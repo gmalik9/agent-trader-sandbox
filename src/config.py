@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     allow_leveraged: bool = True         # allow leveraged / inverse / vol ETFs
     max_leverage: float = 2.0            # cap gross exposure at N× account equity
 
+    # Day-agent risk discipline. Independent of the (optional) venue caps above,
+    # the day agent never concentrates more than this share of equity into a
+    # single symbol per trade. Prevents cheap/volatile names (e.g. a $4 leveraged
+    # ETF) from consuming the whole account under 1%-risk sizing. Set to 0 to
+    # disable (not recommended).
+    day_max_position_pct: float = 0.20   # ≤20% of equity per single-name entry
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -111,8 +111,8 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
     fake = FakeShortTerm()
-    # Wider stop so 1% risk sizing stays under the 25% per-symbol cap.
-    # $30k equity * 1% risk = $300; stop $143 → $7/share → 42 shares = $6.3k (21%).
+    # $30k equity * 1% risk = $300; stop $143 → $7/share → 42 shares by risk.
+    # The 20% concentration cap ($6k / $150 = 40 shares) is tighter and binds.
     prov = ScriptedProvider([_propose("AAPL", 150.0, 143.0),
                               ChatResult(text="done")])
     agent = DayTraderAgent(tmp_db, broker, fake, provider=prov, now=MARKET_OPEN)
@@ -121,9 +121,9 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     assert out.status == "ok"
     assert any(o["status"] == "filled" and o["symbol"] == "AAPL" for o in out.orders)
     pos = {p.symbol: p.qty for p in broker.list_positions("day")}
-    # 1%-risk sizing: $30k * 1% = $300 budget / $7 stop distance = 42 shares
-    # ($6.3k notional, under the 25% symbol cap and $25k order cap).
-    assert pos.get("AAPL") == 42.0
+    # 20% concentration cap binds: $30k * 20% = $6,000 / $150 = 40 shares
+    # (tighter than the 42 shares that 1%-risk sizing alone would allow).
+    assert pos.get("AAPL") == 40.0
 
 
 def test_inverse_substitution_converts_short_leveraged_etf_to_long_inverse(tmp_db, stub_bars):
@@ -155,6 +155,92 @@ def test_inverse_substitution_leaves_ordinary_short_untouched(tmp_db, stub_bars)
                        side="sell", thesis="short AAPL")]
     subbed = agent._maybe_substitute_inverse(orig)
     assert subbed[0].symbol == "AAPL" and subbed[0].side == "sell"
+
+
+def test_summarize_news_aggregates_sentiment():
+    from src.agents.day_trader import _summarize_news
+    raw = {"ticker": "AAPL", "articles": [
+        {"headline": "AAPL soars on blowout earnings", "sentiment": {"score": 0.8, "label": "Positive"}, "source": "finnhub"},
+        {"headline": "Analysts raise targets", "sentiment": {"score": 0.4, "label": "Positive"}, "source": "yahoo"},
+        {"headline": "Minor supply concern", "sentiment": {"score": -0.5, "label": "Negative"}, "source": "reddit"},
+    ]}
+    s = _summarize_news("AAPL", raw)
+    assert s["count"] == 3
+    assert s["sentiment_label"] == "positive"      # avg (0.8+0.4-0.5)/3 = 0.233
+    assert s["bullish_articles"] == 2 and s["bearish_articles"] == 1
+    assert len(s["top_headlines"]) == 3
+    assert s["top_headlines"][0]["headline"].startswith("AAPL soars")  # highest |score|
+
+
+def test_summarize_news_handles_no_articles():
+    from src.agents.day_trader import _summarize_news
+    s = _summarize_news("KO", {"ticker": "KO", "articles": []})
+    assert s["count"] == 0 and s["sentiment_label"] == "no_news"
+
+
+def test_summarize_analyst_extracts_rating_and_upside():
+    from src.agents.day_trader import _summarize_analyst
+    raw = {"ticker": "NVDA", "price": 100.0, "target_price": 130.0,
+           "rating": "Strong Buy", "analyst_count": 42,
+           "sentiment_score": 0.3, "sentiment_label": "Positive"}
+    s = _summarize_analyst("NVDA", raw)
+    assert s["rating"] == "Strong Buy"
+    assert s["target_price"] == 130.0
+    assert s["upside_pct"] == 30.0                 # (130-100)/100 * 100
+    assert s["analyst_count"] == 42
+
+
+class FakeLongTerm:
+    """Stand-in exposing the analyst/news methods the day agent calls."""
+
+    def lookup_ticker(self, ticker):
+        return {"ticker": ticker, "price": 100.0, "target_price": 120.0,
+                "rating": "Buy", "analyst_count": 20, "upside_pct": 20.0,
+                "sentiment_score": 0.2, "sentiment_label": "Positive"}
+
+    def get_news(self, ticker, *, days=7, limit=20):
+        return {"ticker": ticker, "articles": [
+            {"headline": f"{ticker} steady", "sentiment": {"score": 0.1, "label": "Positive"},
+             "source": "finnhub"}]}
+
+
+def test_day_agent_get_analyst_view_via_long_term(tmp_db, stub_bars):
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN,
+                            long_term=FakeLongTerm())
+    # Build the tool closures and invoke get_analyst_view / get_news directly.
+    view = agent._analyst_view("NVDA")
+    assert view["rating"] == "Buy" and view["upside_pct"] == 20.0
+    news = agent._news("NVDA", days=2)
+    assert news["sentiment_label"] == "positive" and news["count"] == 1
+
+
+def test_concentration_cap_limits_single_name_notional(tmp_db, stub_bars, monkeypatch):
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("STOCK_REC_MAX_ORDER_USD", "0")     # venue caps disabled
+    monkeypatch.setenv("STOCK_REC_MAX_SYMBOL_PCT", "0")
+    monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
+    from src import config
+    config.get_settings.cache_clear()
+
+    # Cheap volatile name with a tight stop: 1%-risk sizing alone would buy a
+    # huge notional; the 20% concentration cap must bound it.
+    stub_bars.set("SOXS", o=4.0, h=4.1, l=3.9, c=4.0)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.agents.day_trader import _Proposal
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    equity = broker.get_account("day").equity
+    ds = agent._validate_and_size(
+        [_Proposal(symbol="SOXS", entry_price=4.0, stop_price=3.99, side="buy",
+                    thesis="cheap tight stop")])
+    d = ds[0]
+    assert d.accepted
+    # Notional must not exceed 20% of equity (+ one share of rounding slack).
+    assert d.qty * 4.0 <= equity * 0.20 + 4.0
+    config.get_settings.cache_clear()
 
 
 class FakeOptions:

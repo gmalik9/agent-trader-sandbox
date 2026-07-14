@@ -568,17 +568,77 @@ with tabs[0]:
         "SELECT ts, venue, agent, symbol, side, qty, status, fill_price, fees, dual_group_id "
         "FROM orders ORDER BY ts DESC LIMIT 50"
     )
+    # Money actually deployed per order = filled qty × fill price (0 for
+    # unfilled/rejected rows so they don't inflate the totals).
+    if not orders.empty:
+        fp = pd.to_numeric(orders["fill_price"], errors="coerce")
+        qt = pd.to_numeric(orders["qty"], errors="coerce")
+        filled = orders["status"].astype(str).eq("filled")
+        orders["spend"] = (fp * qt).where(filled, 0.0).fillna(0.0).round(2)
     st.dataframe(
         _readable_ts_column(orders), use_container_width=True, hide_index=True,
         column_config={
             "side": st.column_config.TextColumn("Side", help="buy or sell."),
             "fill_price": st.column_config.NumberColumn("Fill price", format="$%.2f"),
+            "spend": st.column_config.NumberColumn(
+                "Spend", format="$%.2f",
+                help="Money deployed on this order (filled qty × fill price). "
+                     "0 for unfilled or rejected orders."),
             "fees": st.column_config.NumberColumn("Fees", format="$%.2f"),
             "status": st.column_config.TextColumn(
                 "Status", help="filled = executed on the sandbox; routed_external = sent "
                                "to Alpaca paper; rejected = blocked by a risk cap or no bar."),
         },
     )
+
+    # Per-symbol spend summary (filled orders only), with a grand total. Buys add
+    # exposure, sells reduce it, so we net them per symbol per venue.
+    spend = df(
+        "SELECT venue, symbol, "
+        "SUM(CASE WHEN side='buy'  THEN qty*COALESCE(fill_price,0) ELSE 0 END) AS bought, "
+        "SUM(CASE WHEN side='sell' THEN qty*COALESCE(fill_price,0) ELSE 0 END) AS sold, "
+        "SUM(qty*COALESCE(fill_price,0)) AS gross, COUNT(*) AS fills "
+        "FROM orders WHERE status='filled' GROUP BY venue, symbol "
+        "ORDER BY gross DESC LIMIT 50"
+    )
+    st.subheader("Money spent per stock (filled)")
+    if spend.empty:
+        st.caption("No filled orders yet.")
+    else:
+        spend["net_exposure"] = (spend["bought"] - spend["sold"]).round(2)
+        total_gross = float(spend["gross"].sum())
+        equity_ref = None
+        try:
+            eq = df("SELECT equity FROM equity_curve WHERE account_id IN "
+                    "(SELECT id FROM accounts WHERE venue='alpaca_paper') "
+                    "ORDER BY ts DESC LIMIT 1")
+            equity_ref = float(eq.iloc[0]["equity"]) if not eq.empty else None
+        except Exception:
+            equity_ref = None
+        if equity_ref and equity_ref > 0:
+            spend["pct_of_equity"] = (spend["net_exposure"] / equity_ref * 100).round(1)
+        st.dataframe(
+            spend, use_container_width=True, hide_index=True,
+            column_config={
+                "bought": st.column_config.NumberColumn("Bought", format="$%.2f"),
+                "sold": st.column_config.NumberColumn("Sold", format="$%.2f"),
+                "gross": st.column_config.NumberColumn(
+                    "Gross traded", format="$%.2f",
+                    help="Total notional traded (buys + sells) for this symbol."),
+                "net_exposure": st.column_config.NumberColumn(
+                    "Net exposure", format="$%.2f",
+                    help="Buys − sells: approximate capital currently deployed."),
+                "pct_of_equity": st.column_config.NumberColumn(
+                    "% of equity", format="%.1f%%",
+                    help="Net exposure as a share of live Alpaca equity — watch for "
+                         "over-concentration in a single name."),
+                "fills": st.column_config.NumberColumn("Fills"),
+            },
+        )
+        c1, c2 = st.columns(2)
+        c1.metric("Total gross traded (filled)", f"${total_gross:,.2f}")
+        c2.metric("Total net exposure", f"${float(spend['net_exposure'].sum()):,.2f}")
+
 
 
 def _agent_tab(name: str, sub_account: str, mirror: str):
