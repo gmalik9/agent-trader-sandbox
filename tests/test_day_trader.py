@@ -126,6 +126,37 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     assert pos.get("AAPL") == 42.0
 
 
+def test_inverse_substitution_converts_short_leveraged_etf_to_long_inverse(tmp_db, stub_bars):
+    """A short of a leveraged ETF is rewritten as a long of its inverse."""
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    fake = FakeShortTerm()  # lookup_ticker returns a flat quote priced at 150.0
+    agent = DayTraderAgent(tmp_db, broker, fake, provider=ScriptedProvider([]),
+                            now=MARKET_OPEN)
+    from src.agents.day_trader import _Proposal
+    # Short SOXL, entry 100, stop 105 → 5% stop distance.
+    subbed = agent._maybe_substitute_inverse(
+        [_Proposal(symbol="SOXL", entry_price=100.0, stop_price=105.0,
+                    side="sell", thesis="bearish semis")])
+    assert len(subbed) == 1
+    p = subbed[0]
+    assert p.symbol == "SOXS"          # inverse counterpart
+    assert p.side == "buy"             # long the inverse
+    assert p.entry_price == 150.0      # priced from the short-term client
+    assert p.stop_price == 142.5       # 150 * (1 - 0.05), long stop below entry
+    assert "inverse of short SOXL" in p.thesis
+
+
+def test_inverse_substitution_leaves_ordinary_short_untouched(tmp_db, stub_bars):
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    from src.agents.day_trader import _Proposal
+    orig = [_Proposal(symbol="AAPL", entry_price=150.0, stop_price=153.0,
+                       side="sell", thesis="short AAPL")]
+    subbed = agent._maybe_substitute_inverse(orig)
+    assert subbed[0].symbol == "AAPL" and subbed[0].side == "sell"
+
+
 class FakeOptions:
     """Stand-in for AlpacaOptions."""
 

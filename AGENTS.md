@@ -34,8 +34,10 @@ real-money order.** This file documents the guarantees that make that true.
    `false` to restore the long-only / no-leverage blocklist. Note Alpaca itself
    still refuses shorts of non-shortable / hard-to-borrow symbols (e.g. many
    leveraged ETFs return `422 cannot be sold short`) — that is an upstream
-   venue rule, not one of ours. This changes nothing about guarantee #1 — it is
-   still paper only.
+   venue rule, not one of ours. To express a bearish view on a leveraged/inverse
+   ETF the day agent buys (goes long) its inverse counterpart instead (e.g. a
+   short of SOXL is auto-converted to a long of SOXS with an equivalent %% stop).
+   This changes nothing about guarantee #1 — it is still paper only.
 6. **Audit & reconciliation.** Every order, fill, cash move, and agent run is
    written to `data/sandbox.sqlite`. A `reconcile` job runs every minute to pull
    resolved Alpaca order statuses/fills into the local mirror. The Alpaca leg is

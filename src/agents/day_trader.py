@@ -44,6 +44,44 @@ DEFAULT_ATR_PCT = 0.02            # 2% fallback ATR when upstream doesn't return
 MAX_POSITION_PCT = 0.25           # cap any single position at 25% of equity
 MAX_ORDER_USD = 25_000.0          # hard per-order notional cap (fits venue caps)
 
+# Leveraged / inverse ETF pairs. Alpaca refuses to *short* most leveraged and
+# inverse ETFs (422 "cannot be sold short"), so a bearish view on one of these
+# is expressed by BUYING (going long) its inverse counterpart instead. The map
+# is bidirectional: shorting either leg is converted to a long of the other.
+INVERSE_ETF: dict[str, str] = {
+    # Nasdaq-100
+    "TQQQ": "SQQQ", "SQQQ": "TQQQ", "QLD": "QID", "QID": "QLD",
+    # S&P 500
+    "UPRO": "SPXU", "SPXU": "UPRO", "SPXL": "SPXS", "SPXS": "SPXL",
+    "SSO": "SDS", "SDS": "SSO",
+    # Dow
+    "UDOW": "SDOW", "SDOW": "UDOW",
+    # Russell 2000
+    "TNA": "TZA", "TZA": "TNA", "URTY": "SRTY", "SRTY": "URTY",
+    # Semiconductors
+    "SOXL": "SOXS", "SOXS": "SOXL",
+    # Technology
+    "TECL": "TECS", "TECS": "TECL",
+    # Financials
+    "FAS": "FAZ", "FAZ": "FAS",
+    # Biotech
+    "LABU": "LABD", "LABD": "LABU",
+    # Gold miners
+    "NUGT": "DUST", "DUST": "NUGT", "JNUG": "JDST", "JDST": "JNUG",
+    # Energy
+    "ERX": "ERY", "ERY": "ERX", "GUSH": "DRIP", "DRIP": "GUSH",
+    # Oil / nat-gas
+    "UCO": "SCO", "SCO": "UCO", "BOIL": "KOLD", "KOLD": "BOIL",
+    # China
+    "YINN": "YANG", "YANG": "YINN",
+    # Treasuries
+    "TMF": "TMV", "TMV": "TMF",
+    # Volatility (long-vol vs short-vol)
+    "UVXY": "SVXY", "VXX": "SVXY", "VIXY": "SVXY", "SVXY": "VXX",
+    # Single-stock leveraged
+    "TSLL": "TSLQ", "TSLQ": "TSLL", "NVDL": "NVDS", "NVDS": "NVDL",
+}
+
 SYSTEM_PROMPT = """You are "Atlas-Day", an elite discretionary intraday trader operating a PAPER trading account.
 Your sole objective is to maximize risk-adjusted equity growth TODAY while preserving capital.
 You are invoked approximately once per minute during market hours.
@@ -114,6 +152,16 @@ EQUITIES / ETFs
   - directional conviction is high,
   - liquidity is sufficient,
   - and volatility is justified by catalyst + structure.
+- IMPORTANT — expressing a bearish view on a leveraged/inverse ETF:
+  the broker will NOT let you short leveraged or inverse ETFs. To be bearish
+  on one, BUY (go long) its inverse counterpart instead. Examples:
+    - bearish semis: buy SOXS (not short SOXL)
+    - bearish Nasdaq: buy SQQQ (not short TQQQ)
+    - bearish S&P: buy SPXU/SPXS   · bearish small-caps: buy TZA
+    - bearish tech: buy TECS       · bearish financials: buy FAZ
+  Set entry/stop on the ETF you are actually buying. If you do submit a short
+  on a leveraged/inverse ETF, it is automatically converted to a long of its
+  inverse with an equivalent percentage stop.
 
 OPTIONS (defined-risk / high-conviction directional expression)
 - Use only when option liquidity and spread quality are acceptable.
@@ -259,6 +307,7 @@ class DayTraderAgent(AgentBase):
 
         # Ask the LLM.
         proposals, option_proposals, loop_res = self._run_llm_loop()
+        proposals = self._maybe_substitute_inverse(proposals)
         decisions = self._validate_and_size(proposals)
         orders = self._place(decisions)
         option_orders = self._place_options(option_proposals)
@@ -481,6 +530,56 @@ class DayTraderAgent(AgentBase):
                             "instrument": "option", "status": "rejected",
                             "thesis": p.thesis, "accepted": False, "reject_reason": str(e)[:120]})
         return out
+
+    def _maybe_substitute_inverse(self, proposals: list[_Proposal]) -> list[_Proposal]:
+        """Convert shorts of leveraged/inverse ETFs into longs of their inverse.
+
+        Alpaca refuses to short most leveraged/inverse ETFs. A short of such a
+        symbol is rewritten as a BUY of its inverse counterpart, translating the
+        entry/stop to the inverse instrument at an equivalent percentage stop so
+        the 1%-risk sizing stays intact. Non-leveraged shorts pass through
+        unchanged (Alpaca shorts ordinary shortable names fine).
+        """
+        out: list[_Proposal] = []
+        for p in proposals:
+            inv = INVERSE_ETF.get(p.symbol.upper())
+            if p.side != "sell" or not inv or p.entry_price <= 0:
+                out.append(p)
+                continue
+            # Percentage stop distance on the original (short: stop above entry).
+            stop_pct = abs(p.stop_price - p.entry_price) / p.entry_price
+            inv_price = self._latest_price(inv)
+            if inv_price is None or inv_price <= 0:
+                # Can't price the inverse; keep the original so it's visibly
+                # rejected downstream rather than silently dropped.
+                log.info("inverse substitution: no price for %s (short %s); leaving as-is",
+                         inv, p.symbol)
+                out.append(p)
+                continue
+            new_stop = round(inv_price * (1.0 - stop_pct), 2)  # long stop below entry
+            if new_stop >= inv_price:
+                new_stop = round(inv_price * 0.99, 2)
+            log.info("inverse substitution: short %s -> buy %s (entry %.2f stop %.2f, %.2f%% stop)",
+                     p.symbol, inv, inv_price, new_stop, stop_pct * 100)
+            out.append(_Proposal(
+                symbol=inv, entry_price=inv_price, stop_price=new_stop, side="buy",
+                thesis=f"[inverse of short {p.symbol}] {p.thesis}",
+            ))
+        return out
+
+    def _latest_price(self, symbol: str) -> float | None:
+        """Best-effort latest price for a symbol via the short-term client."""
+        try:
+            raw = self.short_term.lookup_ticker(symbol, interval="5m", period="1d")
+        except Exception:
+            log.debug("lookup_ticker failed for %s", symbol, exc_info=True)
+            return None
+        snap = _summarize_quote(symbol, raw)
+        price = snap.get("price")
+        try:
+            return float(price) if price is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def _validate_and_size(self, proposals: list[_Proposal]) -> list[Decision]:
         from src.config import get_settings
