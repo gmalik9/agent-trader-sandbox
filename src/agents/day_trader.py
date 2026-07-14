@@ -37,12 +37,13 @@ from src.sandbox.clock import is_force_flat_window, is_market_open
 
 log = logging.getLogger(__name__)
 
-MAX_CONCURRENT_POSITIONS = 5
+MAX_CONCURRENT_POSITIONS = 8      # allow diversification across uncorrelated names
 ACCOUNT_RISK_PCT = 0.01           # 1% of equity per trade
 DD_HALT_PCT = -2.0                # halt for the day at -2% intraday
 DEFAULT_ATR_PCT = 0.02            # 2% fallback ATR when upstream doesn't return one
 MAX_POSITION_PCT = 0.25           # cap any single position at 25% of equity
 MAX_ORDER_USD = 25_000.0          # hard per-order notional cap (fits venue caps)
+DUST_POSITION_PCT = 0.02          # positions below 2% of equity don't consume a slot
 
 # Leveraged / inverse ETF pairs. Alpaca refuses to *short* most leveraged and
 # inverse ETFs (422 "cannot be sold short"), so a bearish view on one of these
@@ -158,12 +159,19 @@ A setup is tradable only if ALL conditions below are satisfied:
    - Stop distance must be realistic (not too tight for noise, not so wide it ruins R:R).
 
 5) PORTFOLIO FIT (required)
-   - Check `current_positions` and `account_snapshot`.
+   - Check `current_positions` and `account_snapshot`, and read the `portfolio`
+     block returned by `list_intraday_ideas` (idle cash %, names already held,
+     per-name room left).
+   - DIVERSIFY and DEPLOY: if a large share of equity is idle cash, actively put
+     it to work across SEVERAL uncorrelated high-conviction names — do not sit in
+     cash and do not pile into one ticker. Aim to build a book of multiple
+     positions, not a single concentrated bet.
+   - Each idea shows `already_held_pct`, `room_left` and `at_cap`. NEVER re-propose
+     a name with `at_cap=true` (it is already at its ~20% limit and will be
+     rejected); move to the next-best DIFFERENT idea instead.
    - Avoid concentration (single name, single sector/theme, duplicated beta).
-   - Single-name exposure is auto-capped near 20% of equity; do NOT try to load
-     the whole account into one ticker (especially cheap, high-volatility
-     leveraged ETFs) — diversify across uncorrelated setups.
-   - Max 5 concurrent positions overall.
+   - Single-name exposure is auto-capped near 20% of equity; you can hold up to
+     8 concurrent positions — use that room to spread risk.
    - Prefer best marginal setup, not merely “another” setup.
 
 ────────────────────────────────────────────────────────────────────────────
@@ -384,7 +392,32 @@ class DayTraderAgent(AgentBase):
                 res = self.short_term.list_ideas(mode="intraday", tier=tier, limit=limit)
             except Exception as e:
                 return {"error": str(e)}
-            return _summarize_ideas(res)
+            # Annotate with what we already hold and how much room is left per
+            # name, and surface idle cash, so the LLM diversifies into NEW names
+            # instead of re-proposing a symbol that's already at its cap.
+            from src.config import get_settings
+            s = get_settings()
+            try:
+                acct = self.broker.get_account(self.sub_account)
+                positions = self.broker.list_positions(self.sub_account)
+            except Exception:
+                acct, positions = None, []
+            equity = acct.equity if acct else 0.0
+            cap_pct = float(getattr(s, "day_max_position_pct", MAX_POSITION_PCT) or 0.20)
+            held = {}
+            for p in positions:
+                if p.qty > 0 and equity > 0:
+                    held[p.symbol.upper()] = 100.0 * abs(p.qty) * (p.mark_price or 0.0) / equity
+            ctx = {
+                "equity": round(equity, 2) if equity else None,
+                "cash": round(acct.cash, 2) if acct else None,
+                "pct_cash_idle": round(100.0 * acct.cash / equity, 1) if (acct and equity) else None,
+                "per_name_cap_pct": round(cap_pct * 100, 1),
+                "held": {k: round(v, 1) for k, v in held.items()},
+                "open_position_count": len(held),
+                "max_positions": MAX_CONCURRENT_POSITIONS,
+            }
+            return _summarize_ideas(res, held_pct=held, cap_pct=cap_pct * 100, context=ctx)
 
         def get_quote(symbol: str) -> dict:
             try:
@@ -667,13 +700,18 @@ class DayTraderAgent(AgentBase):
         # already hold — prevents accumulating one name past the cap over many
         # ticks (e.g. repeatedly topping up SOXS).
         held_notional = {p.symbol: abs(p.qty) * (p.mark_price or 0.0) for p in positions}
+        # Only MATERIAL positions consume a concurrent-position slot; trivial
+        # dust (< DUST_POSITION_PCT of equity) left over from tests/partial fills
+        # must not block the agent from opening fresh names.
+        dust_floor = acct.equity * DUST_POSITION_PCT if acct.equity else 0.0
+        material_syms = {sym for sym, n in held_notional.items() if n >= dust_floor}
         out: list[Decision] = []
-        slots_left = MAX_CONCURRENT_POSITIONS - len(open_syms)
+        slots_left = MAX_CONCURRENT_POSITIONS - len(material_syms)
 
         for p in proposals:
             d = Decision(symbol=p.symbol, side=p.side, qty=0.0, thesis=p.thesis)
             is_short = p.side == "sell"
-            if slots_left <= 0 and p.symbol not in open_syms:
+            if slots_left <= 0 and p.symbol not in material_syms:
                 d.accepted = False
                 d.reject_reason = "max_concurrent_positions"
                 out.append(d)
@@ -735,7 +773,7 @@ class DayTraderAgent(AgentBase):
                 continue
             d.qty = float(qty)
             d = validate(d, self.broker, self.sub_account)
-            if d.accepted and p.symbol not in open_syms:
+            if d.accepted and p.symbol not in material_syms:
                 slots_left -= 1
             out.append(d)
         return out
@@ -833,7 +871,8 @@ def _summarize_quote(symbol: str, raw: dict) -> dict:
     }
 
 
-def _summarize_ideas(res: dict) -> dict:
+def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
+                     cap_pct: float = 20.0, context: dict | None = None) -> dict:
     """Compact, ranked view of upstream intraday ideas for the LLM.
 
     The upstream scanner already folds 9-source news sentiment into each idea's
@@ -842,17 +881,23 @@ def _summarize_ideas(res: dict) -> dict:
     (``heat_score``), tier, the fired signals, whether a news catalyst is among
     them, and the pre-computed entry/stop/target/RR/$-risk — sorted by
     conviction so the agent can rank and DIVERSIFY instead of hammering one name.
+
+    Each idea is annotated with ``already_held`` / ``room_left`` so the LLM skips
+    names that are already at their per-name cap and deploys idle cash elsewhere.
     """
     if not isinstance(res, dict) or res.get("error"):
         return {"error": (res or {}).get("error", "no_ideas")}
+    held_pct = held_pct or {}
     rows = res.get("rows") or res.get("ideas") or []
     out = []
     for r in rows:
         if not isinstance(r, dict):
             continue
         tags = str(r.get("signal_tags") or "")
+        sym = (r.get("ticker") or r.get("symbol") or "").upper()
+        cur = held_pct.get(sym, 0.0)
         out.append({
-            "ticker": (r.get("ticker") or r.get("symbol") or "").upper(),
+            "ticker": sym,
             "direction": r.get("direction"),
             "tier": r.get("tier"),
             "heat_score": r.get("heat_score"),           # 0..100 conviction
@@ -865,13 +910,21 @@ def _summarize_ideas(res: dict) -> dict:
             "rr": r.get("rr"),
             "dollar_risk": r.get("dollar_risk"),
             "dollar_gain": r.get("dollar_gain"),
+            "already_held_pct": round(cur, 1),
+            "room_left": round(max(0.0, cap_pct - cur), 1),   # % of equity still deployable
+            "at_cap": cur >= cap_pct - 0.5,
         })
     out.sort(key=lambda x: (x.get("heat_score") or 0), reverse=True)
-    return {"count": len(out), "ideas": out,
-            "note": ("Ranked by heat_score (news sentiment is already folded in via "
-                     "the news_spike signal; has_news_catalyst flags it). Diversify "
-                     "across the best setups — do not repeatedly propose the single "
-                     "top name, especially one with no news catalyst.")}
+    result = {"count": len(out), "ideas": out,
+              "note": ("Ranked by heat_score (news sentiment is already folded in via "
+                       "the news_spike signal; has_news_catalyst flags it). DIVERSIFY: "
+                       "each name is capped near "
+                       f"{cap_pct:.0f}% of equity — skip any idea with at_cap=true and "
+                       "deploy idle cash into the next-best DIFFERENT names. Aim to hold "
+                       "several uncorrelated positions, not one.")}
+    if context:
+        result["portfolio"] = context
+    return result
 
 
 def _summarize_news(symbol: str, raw: dict) -> dict:

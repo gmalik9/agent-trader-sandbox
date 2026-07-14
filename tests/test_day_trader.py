@@ -157,6 +157,49 @@ def test_concentration_cap_is_position_aware(tmp_db, stub_bars, monkeypatch):
     config.get_settings.cache_clear()
 
 
+def test_dust_positions_do_not_consume_slots(tmp_db, stub_bars, monkeypatch):
+    """Trivial leftover positions (<2% of equity) must not block new names."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    from src import config
+    config.get_settings.cache_clear()
+    # 8 dust positions (1 share * $10 = 0.03% of $30k equity each).
+    dust = ("AAA", "BBB", "CCC", "DDD", "EEE", "GGG", "HHH", "III")
+    for s in dust:
+        stub_bars.set(s, o=10, h=10.5, l=9.5, c=10)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    for s in dust:
+        broker.place_order(OrderRequest(symbol=s, side="buy", qty=1,
+                                         sub_account="day", agent="manual"))
+    stub_bars.set("NEW", o=100, h=101, l=99, c=100)
+    from src.agents.day_trader import _Proposal, DayTraderAgent
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    ds = agent._validate_and_size(
+        [_Proposal(symbol="NEW", entry_price=100.0, stop_price=98.0,
+                    side="buy", thesis="fresh name")])
+    # Dust doesn't count → the new name is accepted despite 8 held symbols.
+    assert ds[0].accepted and ds[0].reject_reason != "max_concurrent_positions"
+    config.get_settings.cache_clear()
+
+
+def test_summarize_ideas_annotates_holdings_and_room():
+    from src.agents.day_trader import _summarize_ideas
+    res = {"rows": [
+        {"ticker": "SOXS", "direction": "long", "tier": "A", "heat_score": 88.0,
+         "signal_tags": "atr_leader", "rr": 2.0, "entry": 4.0, "stop": 3.9, "target": 4.2},
+        {"ticker": "NVDA", "direction": "long", "tier": "A", "heat_score": 70.0,
+         "signal_tags": "macd_bull_cross", "rr": 2.0, "entry": 100.0, "stop": 98.0, "target": 104.0},
+    ]}
+    s = _summarize_ideas(res, held_pct={"SOXS": 20.0}, cap_pct=20.0,
+                          context={"pct_cash_idle": 79.0})
+    by = {i["ticker"]: i for i in s["ideas"]}
+    assert by["SOXS"]["at_cap"] is True and by["SOXS"]["room_left"] == 0.0
+    assert by["NVDA"]["at_cap"] is False and by["NVDA"]["room_left"] == 20.0
+    assert s["portfolio"]["pct_cash_idle"] == 79.0
+
+
 def test_inverse_substitution_converts_short_leveraged_etf_to_long_inverse(tmp_db, stub_bars):
     """A short of a leveraged ETF is rewritten as a long of its inverse."""
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
@@ -365,21 +408,23 @@ def test_max_concurrent_positions_rejects_extra(tmp_db, stub_bars, monkeypatch):
     from src import config
     config.get_settings.cache_clear()
 
-    # Seed 5 distinct positions on the day book.
-    for s in ("AAA", "BBB", "CCC", "DDD", "EEE"):
+    # Seed 8 distinct MATERIAL positions (each ≥2% of equity so they consume a
+    # concurrent-position slot). $30k equity → 2% = $600; use $1,000 each.
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE", "GGG", "HHH", "III")
+    for s in syms:
         stub_bars.set(s, o=10, h=10.5, l=9.5, c=10)
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
     from src.brokers.base import OrderRequest
-    for s in ("AAA", "BBB", "CCC", "DDD", "EEE"):
-        broker.place_order(OrderRequest(symbol=s, side="buy", qty=1, sub_account="day",
+    for s in syms:
+        broker.place_order(OrderRequest(symbol=s, side="buy", qty=100, sub_account="day",
                                           agent="manual"))
-    # Now the LLM proposes a 6th.
+    # Now the LLM proposes a 9th (over the 8-position limit).
     stub_bars.set("FFF", o=10, h=10.5, l=9.5, c=10)
     prov = ScriptedProvider([_propose("FFF", 10.0, 9.0), ChatResult(text="done")])
     agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
     out = agent.run_once()
 
-    # No 6th fill.
+    # No 9th fill.
     assert not any(o["symbol"] == "FFF" and o["status"] == "filled" for o in out.orders)
     # Decision recorded with reject_reason.
     rejected = [d for d in out.decisions if d["symbol"] == "FFF" and not d["accepted"]]
