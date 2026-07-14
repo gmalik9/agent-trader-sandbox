@@ -598,7 +598,14 @@ class DayTraderAgent(AgentBase):
             "4. Propose only setups with a clear trigger, a defined stop, and >=2:1 "
             "reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing."
             + opt_hint)
-        loop_res = self._run_llm(SYSTEM_PROMPT, user, handlers, max_steps=8)
+        # Budget the LLM tool loop to ~80% of the tick cadence so a slow model
+        # (gpt-5 reasoning + retries) can't overrun the interval and cause the
+        # scheduler to skip subsequent ticks.
+        from src.config import get_settings
+        cadence = float(getattr(get_settings(), "day_tick_seconds", 60) or 60)
+        deadline = max(20.0, cadence * 0.8)
+        loop_res = self._run_llm(SYSTEM_PROMPT, user, handlers, max_steps=8,
+                                  deadline_seconds=deadline)
         return proposals, option_proposals, loop_res
 
     def _place_options(self, proposals: list[_OptionProposal]) -> list[dict]:

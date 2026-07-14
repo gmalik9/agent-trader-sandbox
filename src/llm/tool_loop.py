@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -45,13 +46,22 @@ def run_tool_loop(
     temperature: float = 0.2,
     max_tokens: int = 1024,
     max_steps: int = 8,
+    deadline_seconds: float | None = None,
 ) -> LoopResult:
     registry = {h.spec.name: h for h in handlers}
     tools = [h.spec for h in handlers]
     msgs = list(messages)
     steps: list[StepTrace] = []
+    _start = time.monotonic()
 
     for step in range(1, max_steps + 1):
+        # Wall-clock budget: a single tick must not run for minutes (a slow model
+        # + retries could otherwise overrun the tick cadence and cause the
+        # scheduler to skip subsequent ticks). Stop cleanly with what we have.
+        if deadline_seconds is not None and (time.monotonic() - _start) > deadline_seconds:
+            log.warning("tool loop exceeded deadline (%.0fs) at step %d; stopping early",
+                         deadline_seconds, step)
+            break
         result: ChatResult = provider.chat(msgs, tools=tools or None,
                                             temperature=temperature, max_tokens=max_tokens)
         trace = StepTrace(step=step, text=result.text)

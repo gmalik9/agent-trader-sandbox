@@ -82,11 +82,12 @@ class AgentBase:
         return kill_switch_on(self.conn, agent=self.name)
 
     def _run_llm(self, system: str, user: str, handlers: list[ToolHandler],
-                 *, max_steps: int = 8) -> LoopResult:
+                 *, max_steps: int = 8, deadline_seconds: float | None = None) -> LoopResult:
         if self.provider is None:
             raise RuntimeError(f"{self.name}: no LLM provider configured")
         msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        return run_tool_loop(self.provider, msgs, handlers, max_steps=max_steps)
+        return run_tool_loop(self.provider, msgs, handlers, max_steps=max_steps,
+                             deadline_seconds=deadline_seconds)
 
 
 def now_utc() -> datetime:
