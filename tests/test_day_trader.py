@@ -126,6 +126,37 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     assert pos.get("AAPL") == 40.0
 
 
+def test_concentration_cap_is_position_aware(tmp_db, stub_bars, monkeypatch):
+    """Topping up an existing name cannot breach the per-symbol cap."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("STOCK_REC_MAX_ORDER_USD", "0")
+    monkeypatch.setenv("STOCK_REC_MAX_SYMBOL_PCT", "0")
+    monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
+    from src import config
+    config.get_settings.cache_clear()
+
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    # Seed a position already at ~13% of $30k equity (26 sh * $150 = $3,900).
+    broker.place_order(OrderRequest(symbol="AAPL", side="buy", qty=26,
+                                     sub_account="day", agent="manual"))
+    from src.agents.day_trader import _Proposal, DayTraderAgent
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    equity = broker.get_account("day").equity
+    ds = agent._validate_and_size(
+        [_Proposal(symbol="AAPL", entry_price=150.0, stop_price=143.0,
+                    side="buy", thesis="top up")])
+    d = ds[0]
+    # Cap is 20% ($6k). Already hold ~$3.9k, so only ~$2.1k (14 sh) more allowed.
+    assert d.accepted
+    total_notional = (26 + d.qty) * 150.0
+    assert total_notional <= equity * 0.20 + 150.0
+    config.get_settings.cache_clear()
+
+
 def test_inverse_substitution_converts_short_leveraged_etf_to_long_inverse(tmp_db, stub_bars):
     """A short of a leveraged ETF is rewritten as a long of its inverse."""
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)

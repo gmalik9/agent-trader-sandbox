@@ -661,7 +661,12 @@ class DayTraderAgent(AgentBase):
         from src.config import get_settings
         s = get_settings()
         acct = self.broker.get_account(self.sub_account)
-        open_syms = {p.symbol for p in self.broker.list_positions(self.sub_account) if p.qty > 0}
+        positions = self.broker.list_positions(self.sub_account)
+        open_syms = {p.symbol for p in positions if p.qty > 0}
+        # Existing per-symbol notional so the concentration cap counts what we
+        # already hold — prevents accumulating one name past the cap over many
+        # ticks (e.g. repeatedly topping up SOXS).
+        held_notional = {p.symbol: abs(p.qty) * (p.mark_price or 0.0) for p in positions}
         out: list[Decision] = []
         slots_left = MAX_CONCURRENT_POSITIONS - len(open_syms)
 
@@ -698,7 +703,7 @@ class DayTraderAgent(AgentBase):
             #     (0 => disabled). These are the paper-broker's hard caps.
             if p.entry_price > 0:
                 limits = [qty]
-                # --- per-symbol concentration cap ---
+                # --- per-symbol concentration cap (position-aware) ---
                 sym_pcts: list[float] = []
                 day_pct = float(getattr(s, "day_max_position_pct", MAX_POSITION_PCT) or 0)
                 if day_pct > 0:
@@ -710,7 +715,11 @@ class DayTraderAgent(AgentBase):
                 if venue_pct > 0:
                     sym_pcts.append(venue_pct)
                 if sym_pcts:
-                    limits.append(math.floor((acct.equity * min(sym_pcts)) / p.entry_price))
+                    # Allowance is the cap MINUS what we already hold in this
+                    # name, so topping up across ticks can't breach the cap.
+                    cap_notional = acct.equity * min(sym_pcts)
+                    remaining = cap_notional - held_notional.get(p.symbol, 0.0)
+                    limits.append(math.floor(max(0.0, remaining) / p.entry_price))
                 # --- per-order USD notional cap (venue leg only; 0 => disabled) ---
                 try:
                     order_cap = float(s.stock_rec_max_order_usd)

@@ -82,6 +82,41 @@ class AlpacaPaperBroker(BrokerBase):
 
     # ---------- writes ----------
 
+    @staticmethod
+    def _is_trading_disabled(resp: object) -> bool:
+        return isinstance(resp, dict) and str(resp.get("blocked") or "") == "trading_disabled"
+
+    def _place_via_mcp(self, req: OrderRequest) -> dict:
+        """Submit through the upstream MCP, self-healing a spurious trading gate.
+
+        A long-lived MCP client occasionally returns a `trading_disabled` block
+        even though the subprocess env has `STOCK_REC_MCP_TRADING_ENABLED=true`
+        (a freshly-spawned client always succeeds). When that happens we restart
+        the MCP client once and retry, which reliably clears the false block.
+        """
+        def _call() -> dict:
+            return self.mcp.place_order(
+                symbol=req.symbol.upper(), qty=req.qty, side=req.side,
+                order_type=req.order_type, time_in_force=req.tif,
+                limit_price=req.limit_price,
+            )
+
+        resp = _call()
+        if self._is_trading_disabled(resp):
+            log.warning("alpaca leg returned spurious trading_disabled; "
+                         "restarting MCP client and retrying once")
+            try:
+                self.mcp.stop()
+            except Exception:
+                log.debug("mcp.stop() during self-heal failed", exc_info=True)
+            try:
+                self.mcp.start()
+            except Exception:
+                log.exception("mcp.start() during self-heal failed")
+                return resp
+            resp = _call()
+        return resp
+
     def place_order(self, req: OrderRequest) -> OrderResult:
         aid = dbm.get_account_id(self.conn, _SUB_TO_ACCOUNT.get(req.sub_account, req.sub_account))
         now_s = datetime.now(timezone.utc).isoformat()
@@ -100,14 +135,7 @@ class AlpacaPaperBroker(BrokerBase):
         oid = cur.lastrowid
 
         try:
-            resp = self.mcp.place_order(
-                symbol=req.symbol.upper(),
-                qty=req.qty,
-                side=req.side,
-                order_type=req.order_type,
-                time_in_force=req.tif,
-                limit_price=req.limit_price,
-            )
+            resp = self._place_via_mcp(req)
         except Exception as exc:
             log.exception("alpaca place_order failed for order %s", oid)
             self.conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (oid,))

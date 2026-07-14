@@ -23,6 +23,17 @@ services:
       # Compose already guarantees a single scheduler container; the pid-lock
       # lives on the mounted data volume and would otherwise block restarts.
       SCHEDULER_SKIP_LOCK: "1"
+      # Non-secret broker flags set at the container level so they are present
+      # in the environment from PID 1 — before any Python runs — and are
+      # inherited by every MCP subprocess regardless of spawn timing. This
+      # avoids a startup race where the MCP was spawned before secrets.toml was
+      # merged into os.environ, leaving the Alpaca write tools 'trading_disabled'.
+      # (API keys stay in the mounted secrets.toml; only booleans/caps live here.)
+      ALPACA_PAPER: "true"
+      STOCK_REC_MCP_TRADING_ENABLED: "true"
+      STOCK_REC_ALLOW_LEVERAGED: "true"
+      STOCK_REC_MAX_ORDER_USD: "0"
+      STOCK_REC_MAX_SYMBOL_PCT: "0"
     restart: unless-stopped
 
   web:
