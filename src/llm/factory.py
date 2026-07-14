@@ -16,9 +16,10 @@ def get_provider(name: str | None = None) -> LLMProvider:
         model = (s.llm_model or "").lower()
         if model.startswith("openai/gpt-5") or model.startswith("openai/o"):
             from src.llm.adaptive import AdaptiveGitHubProvider
-            fallback = "openai/gpt-5-mini" if model.startswith("openai/gpt-5") else "openai/gpt-4o-mini"
-            if model in ("openai/gpt-5-mini", "openai/gpt-5-nano"):
-                fallback = "openai/gpt-4o-mini"
+            # Fall back to gpt-4o-mini: on GitHub Models it tolerates much larger
+            # inputs than gpt-5-mini (which caps at ~4k input tokens and 413s on
+            # our full tool-loop payload).
+            fallback = "openai/gpt-4o-mini"
             return AdaptiveGitHubProvider(primary_model=s.llm_model, fallback_model=fallback)
         from src.llm.github_models import GitHubModelsProvider
         return GitHubModelsProvider()

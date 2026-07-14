@@ -22,7 +22,8 @@ ENDPOINT = "https://models.github.ai/inference/chat/completions"
 
 
 class RateLimitError(RuntimeError):
-    """Raised on HTTP 429 / rate-limit so callers can back off or downshift."""
+    """Raised on HTTP 429 (rate limit) or 413 (input too large for the model's
+    tier) so callers can back off or downshift to a bigger-input model."""
 
 # Newer OpenAI families (GPT-5, o-series reasoning models) reject `max_tokens`
 # (require `max_completion_tokens`) and only accept the default temperature.
@@ -83,6 +84,10 @@ class GitHubModelsProvider:
         )
         if resp.status_code == 429:
             raise RateLimitError(f"github models 429 (rate limited): {resp.text[:200]}")
+        if resp.status_code == 413:
+            # Input too large for this model's tier (e.g. gpt-5-mini's 4k cap).
+            # Treat like a rate-limit so callers downshift to a bigger-input model.
+            raise RateLimitError(f"github models 413 (tokens_limit_reached): {resp.text[:200]}")
         if resp.status_code >= 400:
             raise RuntimeError(f"github models {resp.status_code}: {resp.text[:500]}")
         data = resp.json()
