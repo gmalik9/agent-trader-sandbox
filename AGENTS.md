@@ -21,17 +21,25 @@ real-money order.** This file documents the guarantees that make that true.
    and has no other backend.
 3. **Kill-switch.** A row in `settings(key='kill_switch', value='on')` halts
    every agent within one tick (≤ 5 s). The Streamlit Overview tab flips it.
-4. **Caps.** Per-order USD cap, per-symbol % of equity cap, and a gross-exposure
-   / leverage cap (`MAX_LEVERAGE`× equity) enforced inside `SandboxBroker` and
-   via the upstream MCP for the Alpaca leg.
+4. **Caps (configurable).** Per-order USD cap, per-symbol % of equity cap, and a
+   gross-exposure / leverage cap (`MAX_LEVERAGE`× equity) enforced inside
+   `SandboxBroker` and via the upstream MCP for the Alpaca leg. The per-order
+   and per-symbol caps are driven by `STOCK_REC_MAX_ORDER_USD` /
+   `STOCK_REC_MAX_SYMBOL_PCT`; setting either to `0` disables that cap on both
+   legs. Per-trade sizing is still bounded by the account-risk budget (1% of
+   equity per trade).
 5. **Leveraged products & shorting (paper only).** Shorting and leveraged /
    inverse ETFs are permitted by default (`ALLOW_SHORTING=true`,
-   `ALLOW_LEVERAGED=true`) and bounded by the leverage cap above. Set either to
-   `false` to restore the long-only / no-leverage blocklist. This changes
-   nothing about guarantee #1 — it is still paper only.
-6. **Audit.** Every order, fill, cash move, and agent run is written to
-   `data/sandbox.sqlite`. The Alpaca leg is additionally audited by the
-   upstream repo's own SQLite log.
+   `ALLOW_LEVERAGED=true`, `STOCK_REC_ALLOW_LEVERAGED=true`). Set them to
+   `false` to restore the long-only / no-leverage blocklist. Note Alpaca itself
+   still refuses shorts of non-shortable / hard-to-borrow symbols (e.g. many
+   leveraged ETFs return `422 cannot be sold short`) — that is an upstream
+   venue rule, not one of ours. This changes nothing about guarantee #1 — it is
+   still paper only.
+6. **Audit & reconciliation.** Every order, fill, cash move, and agent run is
+   written to `data/sandbox.sqlite`. A `reconcile` job runs every minute to pull
+   resolved Alpaca order statuses/fills into the local mirror. The Alpaca leg is
+   additionally audited by the upstream repo's own SQLite log.
 
 ## Environment variables
 
@@ -47,8 +55,9 @@ real-money order.** This file documents the guarantees that make that true.
 | `ALPACA_SECRET_KEY` | same | |
 | `ALPACA_PAPER` | same; must equal `true` | |
 | `STOCK_REC_MCP_TRADING_ENABLED` | same; must equal `true` | unlocks upstream WRITE tools |
-| `STOCK_REC_MAX_ORDER_USD` | optional | per-order cap on Alpaca leg |
-| `STOCK_REC_MAX_SYMBOL_PCT` | optional | per-symbol % cap on Alpaca leg |
+| `STOCK_REC_MAX_ORDER_USD` | optional | per-order cap on Alpaca leg (`0` disables) |
+| `STOCK_REC_MAX_SYMBOL_PCT` | optional | per-symbol % cap on Alpaca leg (`0` disables) |
+| `STOCK_REC_ALLOW_LEVERAGED` | optional (default `false`) | permit leveraged/inverse/vol ETFs on the Alpaca leg |
 | `SHORT_TERM_TRADER_PATH` | always | absolute path to sibling repo |
 | `STOCK_RECOMMENDER_PATH` | always | absolute path to sibling repo |
 | `CAPITAL_TOTAL` | optional (default `100000`) | |

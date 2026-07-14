@@ -54,8 +54,8 @@ class SandboxBroker(BrokerBase):
         conn: sqlite3.Connection | None = None,
         *,
         bar_provider: BarProvider | None = None,
-        max_order_usd: float = 25_000.0,
-        max_symbol_pct: float = 25.0,
+        max_order_usd: float | None = None,
+        max_symbol_pct: float | None = None,
         blocklist: set[str] | None = None,
         allow_shorting: bool | None = None,
         allow_leveraged: bool | None = None,
@@ -67,9 +67,23 @@ class SandboxBroker(BrokerBase):
             dbm.bootstrap_accounts(conn)
         self.conn = conn
         self.bars = bar_provider or YFinanceBarProvider()
-        self.max_order_usd = max_order_usd
-        self.max_symbol_pct = max_symbol_pct
         s = get_settings()
+        # Caps default to the same env vars that bound the Alpaca leg so the
+        # sandbox mirror never rejects an order the Alpaca leg would accept.
+        # A value of 0 (or negative) disables the cap.
+        def _num(v, default):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+        self.max_order_usd = (
+            _num(s.stock_rec_max_order_usd, 25_000.0) if max_order_usd is None
+            else max_order_usd
+        )
+        self.max_symbol_pct = (
+            _num(s.stock_rec_max_symbol_pct, 25.0) if max_symbol_pct is None
+            else max_symbol_pct
+        )
         self.allow_shorting = s.allow_shorting if allow_shorting is None else allow_shorting
         self.allow_leveraged = s.allow_leveraged if allow_leveraged is None else allow_leveraged
         self.max_leverage = s.max_leverage if max_leverage is None else max_leverage
@@ -141,7 +155,7 @@ class SandboxBroker(BrokerBase):
             return self._reject(req, reason="no_bar")
 
         notional_est = ref_price * req.qty
-        if notional_est > self.max_order_usd:
+        if self.max_order_usd > 0 and notional_est > self.max_order_usd:
             return self._reject(req, reason=f"max_order_usd:{self.max_order_usd}")
 
         cash, pv = self._equity(aid)
@@ -156,7 +170,7 @@ class SandboxBroker(BrokerBase):
             return self._reject(req, reason="shorting_disabled")
 
         # Per-symbol cap: absolute post-trade exposure vs equity (covers shorts).
-        if equity > 0:
+        if equity > 0 and self.max_symbol_pct > 0:
             post_symbol_notional = abs(post_qty) * ref_price
             symbol_pct = 100.0 * post_symbol_notional / equity
             if symbol_pct > self.max_symbol_pct:

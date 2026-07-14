@@ -223,6 +223,57 @@ class AlpacaPaperBroker(BrokerBase):
         )
         return snap
 
+    def reconcile(self) -> int:
+        """Pull recent Alpaca order statuses and sync local `alpaca_paper` rows.
+
+        Orders submitted as market/limit may fill asynchronously; the local row
+        is stamped with the status Alpaca returned at submit time (often
+        'accepted'/'new'). This polls Alpaca for the resolved status and updates
+        the mirror so the UI reflects real fills. Returns rows updated.
+        """
+        try:
+            orders = self.mcp.list_orders(status="all", limit=100)
+        except Exception:
+            log.exception("alpaca reconcile: list_orders failed")
+            return 0
+        by_ext: dict[str, dict] = {}
+        for o in orders or []:
+            oid = str(o.get("id") or o.get("order_id") or "")
+            if oid:
+                by_ext[oid] = o
+        if not by_ext:
+            return 0
+        rows = self.conn.execute(
+            "SELECT id, external_id, status FROM orders WHERE venue=? "
+            "AND external_id IS NOT NULL "
+            "AND status NOT IN ('filled','cancelled','rejected','expired','canceled')",
+            (self.name,),
+        ).fetchall()
+        updated = 0
+        for r in rows:
+            o = by_ext.get(str(r["external_id"]))
+            if not o:
+                continue
+            status = str(o.get("status") or "")
+            if not status or status == r["status"]:
+                continue
+            fp = o.get("filled_avg_price") or o.get("fill_price")
+            try:
+                fp = float(fp) if fp not in (None, "") else None
+            except (TypeError, ValueError):
+                fp = None
+            filled_at = o.get("filled_at")
+            self.conn.execute(
+                "UPDATE orders SET status=?, "
+                "fill_price=COALESCE(?, fill_price), "
+                "filled_at=COALESCE(?, filled_at) WHERE id=?",
+                (status, fp, filled_at, r["id"]),
+            )
+            updated += 1
+        if updated:
+            log.info("alpaca reconcile: updated %d order row(s)", updated)
+        return updated
+
     def equity_curve(self, sub_account: str = "day",
                      since: datetime | None = None) -> pd.DataFrame:
         aid = dbm.get_account_id(self.conn, _SUB_TO_ACCOUNT.get(sub_account, sub_account))

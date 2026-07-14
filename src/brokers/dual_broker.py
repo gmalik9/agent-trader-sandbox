@@ -62,6 +62,18 @@ class DualBroker(BrokerBase):
     def equity_curve(self, sub_account: str = "day", since=None, venue: str = "primary") -> pd.DataFrame:
         return (self.primary if venue == "primary" else self.secondary).equity_curve(sub_account, since)
 
+    def reconcile(self) -> int:
+        """Sync order statuses from any leg that supports it (the Alpaca leg)."""
+        total = 0
+        for leg in (self.primary, self.secondary):
+            fn = getattr(leg, "reconcile", None)
+            if callable(fn):
+                try:
+                    total += int(fn() or 0)
+                except Exception:
+                    log.exception("dual reconcile: leg %s failed", getattr(leg, "name", leg))
+        return total
+
     # ---------- writes (fan out) ----------
 
     def place_order(self, req: OrderRequest) -> OrderResult:

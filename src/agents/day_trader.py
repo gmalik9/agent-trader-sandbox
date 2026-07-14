@@ -44,23 +44,6 @@ DEFAULT_ATR_PCT = 0.02            # 2% fallback ATR when upstream doesn't return
 MAX_POSITION_PCT = 0.25           # cap any single position at 25% of equity
 MAX_ORDER_USD = 25_000.0          # hard per-order notional cap (fits venue caps)
 
-# Leveraged / inverse / vol ETFs that the upstream Alpaca MCP hard-blocks. The
-# day agent avoids these for *stock* orders so trades actually land on Alpaca;
-# leveraged directional exposure can still be taken via options (calls/puts).
-# Union of the Alpaca MCP blocklist and the short-term scanner's leveraged
-# universe so nothing the scanner can surface slips through.
-ALPACA_BLOCKED_EQUITIES = frozenset({
-    "TQQQ", "SQQQ", "SOXL", "SOXS", "FAS", "FAZ", "TNA", "TZA",
-    "UPRO", "SPXU", "SPXL", "UDOW", "SDOW", "LABU", "LABD", "NUGT", "DUST",
-    "JNUG", "JDST", "ERX", "ERY", "YINN", "YANG", "BOIL", "KOLD",
-    "GUSH", "DRIP", "URTY", "SRTY", "TMF", "TMV", "TECL", "TECS",
-    "UCO", "SCO", "QLD", "QID", "SSO", "SDS",
-    "UVXY", "VXX", "SVXY", "VIXY",
-    "TSLL", "TSLQ", "TSLT", "TSLZ", "NVDL", "NVDS", "NVDU", "AAPU", "AAPD",
-    "MSFU", "MSFD", "AMZU", "AMZD", "METU", "BRKU", "CONL", "MSTU", "MSTX",
-    "SH", "DOG", "DXD", "RWM", "PSQ",
-})
-
 SYSTEM_PROMPT = """You are "Atlas-Day", an elite discretionary intraday trader operating a PAPER trading account.
 Your sole objective is to maximize risk-adjusted equity growth TODAY while preserving capital.
 You are invoked approximately once per minute during market hours.
@@ -324,22 +307,9 @@ class DayTraderAgent(AgentBase):
 
         def list_intraday_ideas(*, tier: str = "A", limit: int = 10) -> dict:
             try:
-                res = self.short_term.list_ideas(mode="intraday", tier=tier, limit=limit)
+                return self.short_term.list_ideas(mode="intraday", tier=tier, limit=limit)
             except Exception as e:
                 return {"error": str(e)}
-            # Drop symbols the Alpaca leg will refuse (leveraged/inverse/vol ETFs)
-            # so proposed stock trades can actually execute on Alpaca. Skipped
-            # when leveraged products are permitted (allow_leveraged).
-            from src.config import get_settings
-            if get_settings().allow_leveraged:
-                return res
-            key = "rows" if "rows" in res else ("ideas" if "ideas" in res else None)
-            if key:
-                kept = [r for r in (res.get(key) or [])
-                        if str(r.get("ticker") or r.get("symbol") or "").upper()
-                        not in ALPACA_BLOCKED_EQUITIES]
-                res = {**res, key: kept, "count": len(kept)}
-            return res
 
         def get_quote(symbol: str) -> dict:
             try:
@@ -523,11 +493,6 @@ class DayTraderAgent(AgentBase):
         for p in proposals:
             d = Decision(symbol=p.symbol, side=p.side, qty=0.0, thesis=p.thesis)
             is_short = p.side == "sell"
-            if p.symbol in ALPACA_BLOCKED_EQUITIES and not s.allow_leveraged:
-                d.accepted = False
-                d.reject_reason = "alpaca_blocked_etf"
-                out.append(d)
-                continue
             if slots_left <= 0 and p.symbol not in open_syms:
                 d.accepted = False
                 d.reject_reason = "max_concurrent_positions"

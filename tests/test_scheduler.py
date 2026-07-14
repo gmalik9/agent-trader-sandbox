@@ -30,7 +30,7 @@ def runner(tmp_path, monkeypatch):
 def test_register_jobs_attaches_expected_ids(runner):
     runner.register_jobs()
     job_ids = {j.id for j in runner.scheduler.get_jobs()}
-    assert job_ids == {"mtm", "day_tick", "long_tick", "coord_tick", "tick_poll"}
+    assert job_ids == {"mtm", "reconcile", "day_tick", "long_tick", "coord_tick", "tick_poll"}
 
 
 def test_tick_poll_consumes_request_and_dispatches(runner, monkeypatch):

@@ -2,6 +2,7 @@
 
 Jobs (UTC scheduling; market-hour gating is internal to each job):
 - `mtm`        every 1 min — mark-to-market both sub-accounts
+- `reconcile`  every 1 min — sync Alpaca order statuses into the local mirror
 - `day_tick`   every 1 min — DayTraderAgent.run_once (high-frequency; adaptive
                model downshifts on throttling)
 - `long_tick`  daily at 21:30 UTC (16:30 ET nominal)
@@ -214,6 +215,18 @@ class SchedulerRunner:
         except Exception:
             log.exception("mtm failed")
 
+    def job_reconcile(self) -> None:
+        # Sync Alpaca order statuses into the local mirror so fills show up.
+        # Best-effort; runs regardless of market hours (fills can settle after
+        # close). No-op for sandbox-only backends (broker has no `reconcile`).
+        fn = getattr(self.broker, "reconcile", None)
+        if not callable(fn):
+            return
+        try:
+            fn()
+        except Exception:
+            log.exception("reconcile failed")
+
     def job_day_tick(self) -> None:
         if not is_market_open(now_utc()):
             return
@@ -277,6 +290,7 @@ class SchedulerRunner:
 
     def register_jobs(self) -> None:
         self.scheduler.add_job(self.job_mtm, IntervalTrigger(minutes=1), id="mtm")
+        self.scheduler.add_job(self.job_reconcile, IntervalTrigger(minutes=1), id="reconcile")
         self.scheduler.add_job(self.job_day_tick, IntervalTrigger(minutes=1), id="day_tick")
         self.scheduler.add_job(self.job_long_tick,
                                  CronTrigger(hour=21, minute=30), id="long_tick")
