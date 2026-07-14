@@ -328,7 +328,11 @@ class DayTraderAgent(AgentBase):
             except Exception as e:
                 return {"error": str(e)}
             # Drop symbols the Alpaca leg will refuse (leveraged/inverse/vol ETFs)
-            # so proposed stock trades can actually execute on Alpaca.
+            # so proposed stock trades can actually execute on Alpaca. Skipped
+            # when leveraged products are permitted (allow_leveraged).
+            from src.config import get_settings
+            if get_settings().allow_leveraged:
+                return res
             key = "rows" if "rows" in res else ("ideas" if "ideas" in res else None)
             if key:
                 kept = [r for r in (res.get(key) or [])
@@ -509,6 +513,8 @@ class DayTraderAgent(AgentBase):
         return out
 
     def _validate_and_size(self, proposals: list[_Proposal]) -> list[Decision]:
+        from src.config import get_settings
+        s = get_settings()
         acct = self.broker.get_account(self.sub_account)
         open_syms = {p.symbol for p in self.broker.list_positions(self.sub_account) if p.qty > 0}
         out: list[Decision] = []
@@ -517,7 +523,7 @@ class DayTraderAgent(AgentBase):
         for p in proposals:
             d = Decision(symbol=p.symbol, side=p.side, qty=0.0, thesis=p.thesis)
             is_short = p.side == "sell"
-            if p.symbol in ALPACA_BLOCKED_EQUITIES:
+            if p.symbol in ALPACA_BLOCKED_EQUITIES and not s.allow_leveraged:
                 d.accepted = False
                 d.reject_reason = "alpaca_blocked_etf"
                 out.append(d)
@@ -544,18 +550,29 @@ class DayTraderAgent(AgentBase):
             risk_budget = acct.equity * ACCOUNT_RISK_PCT
             qty = math.floor(risk_budget / risk_per_share)
             # Cap by notional so tight stops on cheap/vol names don't produce
-            # absurd share counts that blow past per-order / per-symbol caps.
-            # Also respect the Alpaca MCP per-order cap so the primary leg fills.
+            # absurd share counts. Both caps are configurable; a value of 0
+            # (STOCK_REC_MAX_ORDER_USD / STOCK_REC_MAX_SYMBOL_PCT) disables that
+            # cap so the only sizing limit is the per-trade account risk above.
             if p.entry_price > 0:
-                from src.config import get_settings
+                limits = [qty]
+                # Per-order USD notional cap. Driven by STOCK_REC_MAX_ORDER_USD
+                # (0 => unlimited); falls back to the local default only when
+                # the setting is missing/unparseable.
                 try:
-                    alpaca_cap = float(get_settings().stock_rec_max_order_usd or MAX_ORDER_USD)
+                    order_cap = float(s.stock_rec_max_order_usd)
                 except (TypeError, ValueError):
-                    alpaca_cap = MAX_ORDER_USD
-                order_cap = min(MAX_ORDER_USD, alpaca_cap)
-                max_by_pct = math.floor((acct.equity * MAX_POSITION_PCT) / p.entry_price)
-                max_by_order = math.floor(order_cap / p.entry_price)
-                qty = min(qty, max_by_pct, max_by_order)
+                    order_cap = MAX_ORDER_USD
+                if order_cap > 0:
+                    limits.append(math.floor(order_cap / p.entry_price))
+                # Per-symbol % of equity cap. Driven by STOCK_REC_MAX_SYMBOL_PCT
+                # (0 => unlimited); falls back to the local default otherwise.
+                try:
+                    sym_pct = float(s.stock_rec_max_symbol_pct) / 100.0
+                except (TypeError, ValueError):
+                    sym_pct = MAX_POSITION_PCT
+                if sym_pct > 0:
+                    limits.append(math.floor((acct.equity * sym_pct) / p.entry_price))
+                qty = min(limits)
             if qty <= 0:
                 d.accepted = False
                 d.reject_reason = "size_rounded_to_zero"
