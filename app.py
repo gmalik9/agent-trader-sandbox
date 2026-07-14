@@ -549,6 +549,23 @@ else:
 _sched_status, _sched_help = _scheduler_status()
 if kill:
     st.error("🛑 KILL SWITCH ON — agents halted.")
+
+# Live throttling notification: if the LLM was rate-limited recently, the agent
+# skips ticks — surface that prominently so idleness is explained.
+_throttled_at = dbm.get_setting(get_writable_conn(), "llm_throttled_at")
+_throttle_dt = _parse_ts(_throttled_at)
+if _throttle_dt is not None:
+    _age_s = (datetime.now(timezone.utc) - _throttle_dt).total_seconds()
+    if _age_s < 180:  # throttled within the last 3 minutes → still relevant
+        _detail = dbm.get_setting(get_writable_conn(), "llm_throttle_detail") or ""
+        st.warning(
+            f"⚠️ LLM throttled { _humanize_age(_throttled_at) } — the model provider "
+            f"returned HTTP 429 (rate limit), so some ticks were skipped. "
+            f"The agent retries with backoff and downshifts to a fallback model; "
+            f"trading resumes automatically once quota frees up. "
+            f"({_detail})",
+            icon="⚠️")
+
 st.markdown(
     f"<div style='color:{_pal['text_muted']};font-size:.82rem;margin:6px 0 2px;'>"
     f"{'🔴 Kill switch ON' if kill else '🟢 Kill switch OFF'} &nbsp;·&nbsp; {_sched_status}</div>",

@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     github_token: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    # Rate-limit resilience: on HTTP 429 the provider retries with exponential
+    # backoff (respecting the server's Retry-After header, capped) before giving
+    # up and letting the adaptive provider downshift.
+    llm_max_retries: int = 3
+    llm_retry_backoff: float = 1.5      # seconds, base for exponential backoff
+    llm_retry_cap: float = 8.0          # max seconds to wait on any single retry
+    # Day-trader cadence. Lower = higher frequency (bounded by the LLM's rate
+    # limit). 60s is the safe default for the GitHub Models free tier.
+    day_tick_seconds: int = 60
 
     # Broker
     broker_backend: str = Field(default="dual")  # 'sandbox' | 'alpaca_paper' | 'dual'

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -48,6 +49,22 @@ class GitHubModelsProvider:
         self.model = model or s.llm_model
         self.endpoint = endpoint
         self._client = client or httpx.Client(timeout=timeout)
+        # Rate-limit retry policy (429s that resolve within a few seconds should
+        # not stall a tick — retry with backoff, respecting Retry-After).
+        self._max_retries = int(getattr(s, "llm_max_retries", 3) or 0)
+        self._retry_backoff = float(getattr(s, "llm_retry_backoff", 1.5) or 1.5)
+        self._retry_cap = float(getattr(s, "llm_retry_cap", 8.0) or 8.0)
+
+    def _retry_after(self, resp: httpx.Response, attempt: int) -> float:
+        """Seconds to wait before the next retry: honor Retry-After if present,
+        else exponential backoff, both capped."""
+        hdr = resp.headers.get("retry-after") or resp.headers.get("x-ratelimit-reset-after")
+        if hdr:
+            try:
+                return min(float(hdr), self._retry_cap)
+            except (TypeError, ValueError):
+                pass
+        return min(self._retry_backoff * (2 ** attempt), self._retry_cap)
 
     def chat(
         self,
@@ -73,25 +90,35 @@ class GitHubModelsProvider:
             body["tools"] = [_tool_to_openai(t) for t in tools]
             body["tool_choice"] = "auto"
 
-        resp = self._client.post(
-            self.endpoint,
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Accept": "application/vnd.github+json",
-                "Content-Type": "application/json",
-            },
-            content=json.dumps(body),
-        )
-        if resp.status_code == 429:
-            raise RateLimitError(f"github models 429 (rate limited): {resp.text[:200]}")
-        if resp.status_code == 413:
-            # Input too large for this model's tier (e.g. gpt-5-mini's 4k cap).
-            # Treat like a rate-limit so callers downshift to a bigger-input model.
-            raise RateLimitError(f"github models 413 (tokens_limit_reached): {resp.text[:200]}")
-        if resp.status_code >= 400:
-            raise RuntimeError(f"github models {resp.status_code}: {resp.text[:500]}")
-        data = resp.json()
-        return _parse_openai_response(data)
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        }
+        payload = json.dumps(body)
+
+        # Retry 429s with backoff (respecting Retry-After) so transient throttling
+        # doesn't stall the tick. After exhausting retries, raise RateLimitError
+        # so the adaptive provider can downshift.
+        attempt = 0
+        while True:
+            resp = self._client.post(self.endpoint, headers=headers, content=payload)
+            if resp.status_code == 429:
+                if attempt < self._max_retries:
+                    wait = self._retry_after(resp, attempt)
+                    log.warning("github models 429 (%s); retry %d/%d in %.1fs",
+                                 self.model, attempt + 1, self._max_retries, wait)
+                    time.sleep(wait)
+                    attempt += 1
+                    continue
+                raise RateLimitError(f"github models 429 (rate limited): {resp.text[:200]}")
+            if resp.status_code == 413:
+                # Input too large for this model's tier (e.g. gpt-5-mini's 4k cap).
+                # Treat like a rate-limit so callers downshift to a bigger-input model.
+                raise RateLimitError(f"github models 413 (tokens_limit_reached): {resp.text[:200]}")
+            if resp.status_code >= 400:
+                raise RuntimeError(f"github models {resp.status_code}: {resp.text[:500]}")
+            return _parse_openai_response(resp.json())
 
 
 def _tool_to_openai(spec: ToolSpec) -> dict[str, Any]:

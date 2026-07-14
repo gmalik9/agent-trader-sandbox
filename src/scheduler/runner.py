@@ -292,7 +292,14 @@ class SchedulerRunner:
     def register_jobs(self) -> None:
         self.scheduler.add_job(self.job_mtm, IntervalTrigger(minutes=1), id="mtm")
         self.scheduler.add_job(self.job_reconcile, IntervalTrigger(minutes=1), id="reconcile")
-        self.scheduler.add_job(self.job_day_tick, IntervalTrigger(minutes=1), id="day_tick")
+        # Day-tick cadence is configurable (DAY_TICK_SECONDS, default 60s) so the
+        # book can be traded at higher frequency when the LLM quota allows. Values
+        # below 60s only help if the model provider isn't rate-limiting; the
+        # provider retries/downshifts and the UI shows a throttle notice otherwise.
+        day_secs = max(5, int(getattr(self.settings, "day_tick_seconds", 60) or 60))
+        self.scheduler.add_job(self.job_day_tick, IntervalTrigger(seconds=day_secs),
+                                 id="day_tick", max_instances=1, coalesce=True)
+        log.info("day_tick cadence: every %ds", day_secs)
         self.scheduler.add_job(self.job_long_tick,
                                  CronTrigger(hour=21, minute=30), id="long_tick")
         self.scheduler.add_job(self.job_coord_tick,

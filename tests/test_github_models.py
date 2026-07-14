@@ -100,3 +100,34 @@ def test_raises_on_http_error():
     prov = _make(transport)
     with pytest.raises(RuntimeError):
         prov.chat([{"role": "user", "content": "x"}])
+
+
+def test_retries_429_then_succeeds(monkeypatch):
+    from src.llm.github_models import RateLimitError  # noqa: F401
+    import src.llm.github_models as gm
+    monkeypatch.setattr(gm.time, "sleep", lambda *_: None)  # no real waiting
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(429, headers={"retry-after": "0"}, text="slow down")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    prov = _make(httpx.MockTransport(handler))
+    prov._max_retries = 3
+    res = prov.chat([{"role": "user", "content": "x"}])
+    assert res.text == "ok"
+    assert calls["n"] == 3          # two 429s retried, third OK
+
+
+def test_raises_ratelimit_after_retries_exhausted(monkeypatch):
+    from src.llm.github_models import RateLimitError
+    import src.llm.github_models as gm
+    monkeypatch.setattr(gm.time, "sleep", lambda *_: None)
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(429, headers={"retry-after": "0"}, text="nope"))
+    prov = _make(transport)
+    prov._max_retries = 2
+    with pytest.raises(RateLimitError):
+        prov.chat([{"role": "user", "content": "x"}])

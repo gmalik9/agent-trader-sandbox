@@ -344,8 +344,15 @@ class DayTraderAgent(AgentBase):
             proposals, option_proposals, loop_res = self._run_llm_loop()
         except RateLimitError as e:
             # Provider (and its fallback) are rate-limited this tick. Record a
-            # visible no-op so idleness is explained rather than a silent crash /
-            # gap in the run history.
+            # visible no-op AND a throttle marker in settings so the UI can show
+            # a live throttling notification instead of a silent gap.
+            try:
+                dbm.set_setting(self.conn, "llm_throttled_at", now_utc().isoformat())
+                dbm.set_setting(self.conn, "llm_throttle_detail",
+                                f"{self.name}: {str(e)[:180]}")
+            except Exception:
+                log.debug("failed to record throttle marker", exc_info=True)
+            log.warning("day tick throttled (LLM rate-limited): %s", str(e)[:180])
             rid = self._record_run(status="no-op", prompt="rate_limited", response=None,
                                     tools_called=None, decisions=None,
                                     error=f"rate_limited:{str(e)[:160]}",
