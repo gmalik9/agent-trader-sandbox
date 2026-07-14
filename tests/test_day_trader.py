@@ -195,9 +195,31 @@ def test_summarize_ideas_annotates_holdings_and_room():
     s = _summarize_ideas(res, held_pct={"SOXS": 20.0}, cap_pct=20.0,
                           context={"pct_cash_idle": 79.0})
     by = {i["ticker"]: i for i in s["ideas"]}
-    assert by["SOXS"]["at_cap"] is True and by["SOXS"]["room_left"] == 0.0
+    # At-cap names are hidden from the tradable list (forces rotation)…
+    assert "SOXS" not in by
+    assert s["hidden_at_cap"] == ["SOXS"]
+    # …and names with room remain, annotated.
     assert by["NVDA"]["at_cap"] is False and by["NVDA"]["room_left"] == 20.0
+    assert s["count"] == 1
     assert s["portfolio"]["pct_cash_idle"] == 79.0
+
+
+def test_summarize_ideas_hides_inverse_of_capped_holding():
+    """A short idea that substitutes into an at-cap holding is hidden too."""
+    from src.agents.day_trader import _summarize_ideas
+    # We hold UCO at its 20% cap. "short SCO" would convert to "long UCO" — so
+    # the SCO idea must be hidden even though we don't hold SCO directly.
+    res = {"rows": [
+        {"ticker": "SCO", "direction": "short", "tier": "A", "heat_score": 80.0,
+         "signal_tags": "gapper", "rr": 2.0, "entry": 20.0, "stop": 21.0, "target": 18.0},
+        {"ticker": "TECS", "direction": "long", "tier": "A", "heat_score": 70.0,
+         "signal_tags": "vwap_reclaim", "rr": 2.0, "entry": 7.0, "stop": 6.9, "target": 7.2},
+    ]}
+    s = _summarize_ideas(res, held_pct={"UCO": 20.0}, cap_pct=20.0)
+    tickers = [i["ticker"] for i in s["ideas"]]
+    assert "SCO" not in tickers          # short SCO -> long UCO (capped) → hidden
+    assert "TECS" in tickers
+    assert "SCO" in s["hidden_at_cap"]
 
 
 def test_inverse_substitution_converts_short_leveraged_etf_to_long_inverse(tmp_db, stub_bars):

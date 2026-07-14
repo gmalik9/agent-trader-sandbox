@@ -30,6 +30,7 @@ from src.agents.base import AgentBase, RunOutcome, now_utc, time_ms
 from src.agents.policy import Decision, validate
 from src.brokers.base import BrokerBase, OrderRequest
 from src.llm.provider import LLMProvider, ToolSpec
+from src.llm.github_models import RateLimitError
 from src.llm.tool_loop import ToolHandler
 from src.mcp_clients.short_term import ShortTermClient
 from src.sandbox import db as dbm
@@ -339,7 +340,17 @@ class DayTraderAgent(AgentBase):
             return RunOutcome(status="no-op", run_id=rid)
 
         # Ask the LLM.
-        proposals, option_proposals, loop_res = self._run_llm_loop()
+        try:
+            proposals, option_proposals, loop_res = self._run_llm_loop()
+        except RateLimitError as e:
+            # Provider (and its fallback) are rate-limited this tick. Record a
+            # visible no-op so idleness is explained rather than a silent crash /
+            # gap in the run history.
+            rid = self._record_run(status="no-op", prompt="rate_limited", response=None,
+                                    tools_called=None, decisions=None,
+                                    error=f"rate_limited:{str(e)[:160]}",
+                                    latency_ms=time_ms() - start)
+            return RunOutcome(status="no-op", error="rate_limited", run_id=rid)
         proposals = self._maybe_substitute_inverse(proposals)
         decisions = self._validate_and_size(proposals)
         orders = self._place(decisions)
@@ -895,10 +906,19 @@ def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
             continue
         tags = str(r.get("signal_tags") or "")
         sym = (r.get("ticker") or r.get("symbol") or "").upper()
-        cur = held_pct.get(sym, 0.0)
+        direction = str(r.get("direction") or "").lower()
+        # The order actually placed may be substituted: a SHORT of a leveraged/
+        # inverse ETF becomes a LONG of its inverse counterpart. Judge the cap
+        # against the symbol we'd ACTUALLY end up holding, so we hide e.g.
+        # "short SCO" when we already hold UCO at its cap.
+        effective = sym
+        if direction in ("short", "sell") and sym in INVERSE_ETF:
+            effective = INVERSE_ETF[sym]
+        cur = held_pct.get(effective, held_pct.get(sym, 0.0))
         out.append({
             "ticker": sym,
             "direction": r.get("direction"),
+            "effective_symbol": effective,
             "tier": r.get("tier"),
             "heat_score": r.get("heat_score"),           # 0..100 conviction
             "signal_tags": tags,                          # scanners that fired
@@ -915,13 +935,21 @@ def _summarize_ideas(res: dict, *, held_pct: dict | None = None,
             "at_cap": cur >= cap_pct - 0.5,
         })
     out.sort(key=lambda x: (x.get("heat_score") or 0), reverse=True)
-    result = {"count": len(out), "ideas": out,
+    # Hide names that are already at their per-name cap: proposing them just
+    # rounds to zero shares and wastes the tick. Removing them forces the agent
+    # to rotate into fresh names and deploy idle cash instead of re-proposing
+    # the same maxed-out ticker every minute.
+    tradable = [i for i in out if not i["at_cap"]]
+    hidden = [i["ticker"] for i in out if i["at_cap"]]
+    result = {"count": len(tradable), "ideas": tradable,
               "note": ("Ranked by heat_score (news sentiment is already folded in via "
-                       "the news_spike signal; has_news_catalyst flags it). DIVERSIFY: "
-                       "each name is capped near "
-                       f"{cap_pct:.0f}% of equity — skip any idea with at_cap=true and "
-                       "deploy idle cash into the next-best DIFFERENT names. Aim to hold "
-                       "several uncorrelated positions, not one.")}
+                       "the news_spike signal; has_news_catalyst flags it). These are "
+                       "names with ROOM LEFT — names already at the per-name "
+                       f"~{cap_pct:.0f}% cap have been removed. DIVERSIFY: open NEW "
+                       "positions across several uncorrelated ideas and deploy idle "
+                       "cash; do not sit idle when tradable ideas exist.")}
+    if hidden:
+        result["hidden_at_cap"] = hidden
     if context:
         result["portfolio"] = context
     return result
