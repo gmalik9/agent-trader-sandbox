@@ -30,7 +30,8 @@ def runner(tmp_path, monkeypatch):
 def test_register_jobs_attaches_expected_ids(runner):
     runner.register_jobs()
     job_ids = {j.id for j in runner.scheduler.get_jobs()}
-    assert job_ids == {"mtm", "reconcile", "day_tick", "long_tick", "coord_tick", "tick_poll"}
+    assert job_ids == {"mtm", "reconcile", "day_tick", "scan_refresh",
+                        "long_tick", "coord_tick", "tick_poll"}
 
 
 def test_tick_poll_consumes_request_and_dispatches(runner, monkeypatch):
@@ -75,3 +76,30 @@ def test_tick_poll_records_consumption_even_when_agent_raises(runner, monkeypatc
     runner.job_tick_poll()
     row = runner.conn.execute("SELECT consumed_at FROM tick_requests").fetchone()
     assert row["consumed_at"] is not None
+
+
+def test_scan_refresh_triggers_scan_run(runner, monkeypatch):
+    """The scan_refresh job must call scan_run to unfreeze the idea cache."""
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: True)
+    st = MagicMock()
+    runner.short_term = st
+    runner.job_scan_refresh()
+    st.scan_run.assert_called_once()
+    assert st.scan_run.call_args.kwargs.get("mode") == "intraday"
+
+
+def test_scan_refresh_swallows_timeout(runner, monkeypatch):
+    """A client-side timeout is benign (server keeps scanning) — must not raise."""
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: True)
+    st = MagicMock()
+    st.scan_run.side_effect = TimeoutError()
+    runner.short_term = st
+    runner.job_scan_refresh()  # should not raise
+
+
+def test_scan_refresh_skips_when_market_closed(runner, monkeypatch):
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: False)
+    st = MagicMock()
+    runner.short_term = st
+    runner.job_scan_refresh()
+    st.scan_run.assert_not_called()

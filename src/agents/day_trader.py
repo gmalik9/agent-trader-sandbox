@@ -444,10 +444,22 @@ class DayTraderAgent(AgentBase):
         option_proposals: list[_OptionProposal] = []
 
         def list_intraday_ideas(*, tier: str = "A", limit: int = 10) -> dict:
-            try:
-                res = self.short_term.list_ideas(mode="intraday", tier=tier, limit=limit)
-            except Exception as e:
-                return {"error": str(e)}
+            # Auto-broaden: the scanner often has zero tier-A (and B) setups on a
+            # quiet tape, which would hand the LLM an empty list and it would sit
+            # idle. Widen A→B→C until we get a non-empty candidate universe so the
+            # agent always has fresh names to evaluate; note when we broadened.
+            tier = (tier or "A").upper()
+            widen = {"A": ["A", "B", "C"], "B": ["B", "C"], "C": ["C"]}.get(tier, ["A", "B", "C"])
+            res, used_tier = None, tier
+            for t in widen:
+                try:
+                    res = self.short_term.list_ideas(mode="intraday", tier=t, limit=limit)
+                except Exception as e:
+                    return {"error": str(e)}
+                rows = (res.get("ideas") or res.get("rows") or []) if isinstance(res, dict) else []
+                used_tier = t
+                if rows:
+                    break
             # Annotate with what we already hold and how much room is left per
             # name, and surface idle cash, so the LLM diversifies into NEW names
             # instead of re-proposing a symbol that's already at its cap.
@@ -484,6 +496,9 @@ class DayTraderAgent(AgentBase):
                 "open_position_count": len(held),
                 "max_positions": MAX_CONCURRENT_POSITIONS,
             }
+            if used_tier != tier:
+                ctx["tier_requested"] = tier
+                ctx["tier_broadened_to"] = used_tier
             return _summarize_ideas(res, held_pct=held, cap_pct=cap_pct * 100,
                                      theme_exposure=theme_exposure,
                                      theme_cap_pct=theme_cap_pct * 100,

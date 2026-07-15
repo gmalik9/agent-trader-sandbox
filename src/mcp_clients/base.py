@@ -153,12 +153,12 @@ class MCPClient:
 
     # ---------- calls ----------
 
-    def _submit(self, coro) -> Any:
+    def _submit(self, coro, timeout: float | None = None) -> Any:
         if self._loop is None or self._session is None:
             raise MCPClientError("client not started")
         fut: Future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         try:
-            return fut.result(timeout=self.call_timeout)
+            return fut.result(timeout=timeout if timeout is not None else self.call_timeout)
         except Exception as exc:
             self._failures += 1
             if self._failures >= 3:
@@ -169,12 +169,16 @@ class MCPClient:
                 self._failures = 0
             raise
 
-    def call(self, tool: str, **args: Any) -> Any:
-        """Call an MCP tool and return the parsed JSON payload (first text block)."""
+    def call(self, tool: str, *, _timeout: float | None = None, **args: Any) -> Any:
+        """Call an MCP tool and return the parsed JSON payload (first text block).
+
+        ``_timeout`` overrides the default ``call_timeout`` for this one call
+        (used by slow tools like ``scan_run`` that scan a large universe).
+        """
         async def _do():
             result = await self._session.call_tool(tool, arguments=args)
             return _extract_payload(result)
-        out = self._submit(_do())
+        out = self._submit(_do(), timeout=_timeout)
         self._failures = 0
         return out
 

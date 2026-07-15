@@ -244,6 +244,28 @@ class SchedulerRunner:
         finally:
             self._day_tick_started_at = None
 
+    def job_scan_refresh(self) -> None:
+        # Refresh the intraday scanner cache so list_ideas returns FRESH ideas
+        # (and prices) instead of the last scan. Without this the idea universe
+        # freezes at whenever scan_run last ran, and the agent keeps seeing stale
+        # names/prices. Market-hours only. The upstream server keeps working even
+        # if our client wait cap elapses, so a timeout here is benign.
+        if not is_market_open(now_utc()):
+            return
+        st = self.short_term
+        if st is None or not hasattr(st, "scan_run"):
+            return
+        timeout = float(getattr(self.settings, "scan_refresh_timeout_seconds", 300.0) or 300.0)
+        t0 = time.monotonic()
+        try:
+            st.scan_run(mode="intraday", universe="liquid", timeout=timeout)
+            log.info("scan_refresh: ideas refreshed in %.0fs", time.monotonic() - t0)
+        except TimeoutError:
+            log.info("scan_refresh: client wait cap hit after %.0fs (server keeps "
+                      "scanning; cache updates when done)", time.monotonic() - t0)
+        except Exception:
+            log.exception("scan_refresh failed")
+
     def job_long_tick(self) -> None:
         try:
             self._long_agent().run_once()
@@ -308,6 +330,15 @@ class SchedulerRunner:
         self.scheduler.add_job(self.job_day_tick, IntervalTrigger(seconds=day_secs),
                                  id="day_tick", max_instances=1, coalesce=True)
         log.info("day_tick cadence: every %ds", day_secs)
+        # Keep the intraday idea universe fresh (list_ideas only returns the last
+        # scan_run). Runs on its own thread so a slow scan doesn't wedge day ticks.
+        scan_secs = int(getattr(self.settings, "scan_refresh_seconds", 300) or 0)
+        if scan_secs > 0:
+            self.scheduler.add_job(self.job_scan_refresh,
+                                     IntervalTrigger(seconds=max(60, scan_secs)),
+                                     id="scan_refresh", max_instances=1, coalesce=True,
+                                     next_run_time=now_utc())
+            log.info("scan_refresh cadence: every %ds", max(60, scan_secs))
         self.scheduler.add_job(self.job_long_tick,
                                  CronTrigger(hour=21, minute=30), id="long_tick")
         self.scheduler.add_job(self.job_coord_tick,

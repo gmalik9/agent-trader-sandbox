@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     # Day-trader cadence. Lower = higher frequency (bounded by the LLM's rate
     # limit). 60s is the safe default for the GitHub Models free tier.
     day_tick_seconds: int = 60
+    # Intraday scanner refresh. list_ideas only returns the LAST scan_run result,
+    # so without a periodic refresh the idea universe (and its prices) goes stale.
+    # scan_run rescans the liquid universe (~2-3 min) and shares the sibling MCP
+    # subprocess with the day agent, so a scan briefly slows one day tick; a
+    # 10-min cadence keeps ideas fresh while keeping that disruption infrequent.
+    # Price staleness for sizing is separately handled by _reprice_to_market.
+    # Set to 0 to disable the refresh job.
+    scan_refresh_seconds: int = 600
+    scan_refresh_timeout_seconds: float = 300.0  # client wait cap for one scan
     # Alpaca leg is the source of truth — retry transient order failures
     # (spurious trading_disabled, transport errors) before giving up.
     alpaca_max_retries: int = 4

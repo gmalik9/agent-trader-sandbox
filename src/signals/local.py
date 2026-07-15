@@ -178,6 +178,13 @@ class LocalShortTermClient:
     def start(self) -> None: return None
     def stop(self) -> None: return None
     def health(self) -> bool: return True
+
+    def scan_run(self, *, mode: str = "intraday", universe: str = "liquid",
+                 watchlist: list[str] | None = None, timeout: float | None = None) -> dict:
+        # Local ideas are computed on-demand from live yfinance bars in
+        # list_ideas, so there's no cached scan to refresh — this is a no-op.
+        return {"source": "local-yfinance", "refreshed": False,
+                "note": "local ideas are computed live; no scan cache to refresh"}
     def list_tool_names(self) -> list[str]: return ["list_ideas", "lookup_ticker"]
 
     def list_ideas(self, *, mode: str = "intraday", tier: str = "A",
@@ -381,6 +388,15 @@ class HybridShortTermClient:
 
     def list_tool_names(self) -> list[str]:
         return ["list_ideas", "lookup_ticker"]
+
+    def scan_run(self, *, mode: str = "intraday", universe: str = "liquid",
+                 watchlist: list[str] | None = None, timeout: float | None = None) -> dict:
+        """Refresh the upstream scanner's cached ideas. No-op on the local leg."""
+        if self._real is not None:
+            return self._real.scan_run(mode=mode, universe=universe,
+                                        watchlist=watchlist, timeout=timeout)
+        return self._local.scan_run(mode=mode, universe=universe,
+                                     watchlist=watchlist, timeout=timeout)
 
     def list_ideas(self, *, mode: str = "intraday", tier: str = "A",
                    limit: int = 10) -> dict:

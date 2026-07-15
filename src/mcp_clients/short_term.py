@@ -40,9 +40,9 @@ class ShortTermClient:
         return self._mcp.call("scan_latest", universe=universe, limit=limit)
 
     def scan_run(self, *, mode: str = "intraday", universe: str = "liquid",
-                 watchlist: list[str] | None = None) -> dict:
+                 watchlist: list[str] | None = None, timeout: float | None = None) -> dict:
         return self._mcp.call("scan_run", mode=mode, universe=universe,
-                              watchlist=watchlist or [])
+                              watchlist=watchlist or [], _timeout=timeout)
 
     def list_ideas(self, *, mode: str = "intraday", tier: str = "A",
                    limit: int = 10) -> dict:
