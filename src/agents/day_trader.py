@@ -396,6 +396,7 @@ class DayTraderAgent(AgentBase):
                                     latency_ms=time_ms() - start)
             return RunOutcome(status="no-op", error="rate_limited", run_id=rid)
         proposals = self._maybe_substitute_inverse(proposals)
+        proposals = self._reprice_to_market(proposals)
         decisions = self._validate_and_size(proposals)
         orders = self._place(decisions)
         option_orders = self._place_options(option_proposals)
@@ -744,6 +745,39 @@ class DayTraderAgent(AgentBase):
             out.add(sym)
             if sym in INVERSE_ETF:
                 out.add(INVERSE_ETF[sym])
+        return out
+
+    def _reprice_to_market(self, proposals: list[_Proposal]) -> list[_Proposal]:
+        """Rescale each proposal's entry/stop to the REAL market price.
+
+        The upstream scanner occasionally reports stale/split-adjusted prices
+        (e.g. SOXS at $4.68 when it actually trades near $47 — a 10x error). If
+        we size on the stale price the notional is ~10x off, which blows past the
+        account's buying power (Alpaca rejects `insufficient buying power`) and
+        fills the mirror at the wrong price. We fetch the live price and, when it
+        diverges from the proposed entry beyond a tolerance, scale entry AND stop
+        by the same factor so the % stop distance (risk structure) is preserved
+        but the absolute dollars are correct.
+        """
+        TOL = 0.05  # >5% divergence → reprice
+        out: list[_Proposal] = []
+        for p in proposals:
+            if p.entry_price <= 0:
+                out.append(p)
+                continue
+            real = self._latest_price(p.symbol)
+            if real is None or real <= 0 or abs(real - p.entry_price) / p.entry_price <= TOL:
+                out.append(p)
+                continue
+            factor = real / p.entry_price
+            new_entry = round(real, 4)
+            new_stop = round(p.stop_price * factor, 4)
+            log.warning("repricing %s: scanner entry %.4f -> market %.4f (x%.2f); "
+                         "stop %.4f -> %.4f", p.symbol, p.entry_price, new_entry,
+                         factor, p.stop_price, new_stop)
+            out.append(_Proposal(symbol=p.symbol, entry_price=new_entry,
+                                  stop_price=new_stop, side=p.side,
+                                  thesis=f"[repriced x{factor:.2f}] {p.thesis}"))
         return out
 
     def _maybe_substitute_inverse(self, proposals: list[_Proposal]) -> list[_Proposal]:

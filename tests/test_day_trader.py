@@ -306,6 +306,34 @@ def test_inverse_substitution_leaves_ordinary_short_untouched(tmp_db, stub_bars)
     assert subbed[0].symbol == "AAPL" and subbed[0].side == "sell"
 
 
+def test_reprice_to_market_rescales_stale_scanner_price(tmp_db, stub_bars):
+    """A stale scanner entry (10x off) is rescaled to the real market price,
+    preserving the % stop distance."""
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    # FakeShortTerm.lookup_ticker reports price/last = 150.0 for any symbol.
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    from src.agents.day_trader import _Proposal
+    # Scanner says entry 15, stop 14.7 (2% stop). Real price is 150 (10x).
+    out = agent._reprice_to_market(
+        [_Proposal(symbol="XYZ", entry_price=15.0, stop_price=14.7, side="buy")])
+    p = out[0]
+    assert p.entry_price == 150.0                     # repriced to market
+    assert abs(p.stop_price - 147.0) < 0.01           # stop scaled x10 (2% preserved)
+    assert "repriced" in p.thesis
+
+
+def test_reprice_to_market_leaves_accurate_price_untouched(tmp_db, stub_bars):
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    from src.agents.day_trader import _Proposal
+    # Scanner entry 150 already matches the real price (150) → unchanged.
+    out = agent._reprice_to_market(
+        [_Proposal(symbol="XYZ", entry_price=150.0, stop_price=147.0, side="buy")])
+    assert out[0].entry_price == 150.0 and "repriced" not in (out[0].thesis or "")
+
+
 def test_summarize_ideas_ranks_and_flags_news_catalyst():
     from src.agents.day_trader import _summarize_ideas
     res = {"rows": [
