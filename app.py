@@ -798,14 +798,49 @@ def _agent_tab(name: str, sub_account: str, mirror: str):
     o = df("SELECT ts, venue, symbol, side, qty, status, fill_price, fees FROM orders "
             "WHERE account_id IN (?, ?) ORDER BY ts DESC LIMIT 50",
             (aid_primary, aid_mirror or -1))
+    if not o.empty:
+        fp = pd.to_numeric(o["fill_price"], errors="coerce")
+        qt = pd.to_numeric(o["qty"], errors="coerce")
+        fee = pd.to_numeric(o["fees"], errors="coerce").fillna(0.0)
+        filled = o["status"].astype(str).eq("filled")
+        # Net price = all-in cash cost of the order: qty × fill price + fees.
+        o["net_price"] = ((fp * qt) + fee).where(filled, 0.0).fillna(0.0).round(2)
     st.dataframe(
         _readable_ts_column(o), use_container_width=True, hide_index=True,
         column_config={
             "side": st.column_config.TextColumn("Side"),
             "fill_price": st.column_config.NumberColumn("Fill price", format="$%.2f"),
+            "net_price": st.column_config.NumberColumn(
+                "Net price", format="$%.2f",
+                help="All-in cash cost of the order: filled qty × fill price + fees. "
+                     "0 for unfilled or rejected orders."),
             "fees": st.column_config.NumberColumn("Fees", format="$%.2f"),
         },
     )
+
+    # Cumulative cost of holdings still OPEN for this agent (buys − sells + fees
+    # per symbol, excluding names fully squared off). Totalled per venue so the
+    # sandbox mirror doesn't double-count the Alpaca leg.
+    agent_open = df(
+        "SELECT venue, symbol, "
+        "SUM(CASE WHEN side='buy' THEN qty ELSE -qty END) AS net_qty, "
+        "SUM(CASE WHEN side='buy' THEN qty*COALESCE(fill_price,0) "
+        "         ELSE -qty*COALESCE(fill_price,0) END) "
+        "  + SUM(COALESCE(fees,0)) AS net_cost "
+        "FROM orders WHERE status='filled' AND account_id IN (?, ?) "
+        "GROUP BY venue, symbol",
+        (aid_primary, aid_mirror or -1))
+    if not agent_open.empty:
+        still_open = agent_open[agent_open["net_qty"].round(4) != 0.0]
+        by_venue = still_open.groupby("venue")["net_cost"].sum()
+        ac1, ac2 = st.columns(2)
+        ac1.metric(
+            "Open holdings cost (Alpaca)", f"${float(by_venue.get('alpaca_paper', 0.0)):,.2f}",
+            help="Net cash cost (buys − sells + fees) of this agent's positions still "
+                 "open on the live Alpaca leg. Squared-off names excluded.")
+        ac2.metric(
+            "Open holdings cost (sandbox mirror)", f"${float(by_venue.get('sandbox', 0.0)):,.2f}",
+            help="Same figure for the local sandbox mirror.")
 
     st.divider()
     if aid_primary:
