@@ -123,6 +123,10 @@ class AlpacaPaperBroker(BrokerBase):
         max_attempts = max(1, int(getattr(s, "alpaca_max_retries", 4) or 1))
         backoff = float(getattr(s, "alpaca_retry_backoff", 1.0) or 1.0)
         cap = float(getattr(s, "alpaca_retry_cap", 6.0) or 6.0)
+        # Overall wall-clock budget for the whole retry sequence: a slow MCP
+        # restart + retries must NOT block the scheduler tick for minutes (that
+        # recreated the multi-minute stall). Give up cleanly past the budget.
+        time_budget = float(getattr(s, "alpaca_place_budget_seconds", 25.0) or 25.0)
 
         def _call() -> dict:
             return self.mcp.place_order(
@@ -131,6 +135,8 @@ class AlpacaPaperBroker(BrokerBase):
                 limit_price=req.limit_price,
             )
 
+        started = time.monotonic()
+        restarted = False  # restart the MCP client at MOST once per order
         last_resp: dict = {}
         for attempt in range(max_attempts):
             try:
@@ -149,9 +155,16 @@ class AlpacaPaperBroker(BrokerBase):
             if self._is_permanent_reject(resp):
                 return resp  # venue will refuse every time; don't waste retries
 
+            # Out of time budget → stop retrying so the tick isn't blocked.
+            if time.monotonic() - started > time_budget:
+                log.warning("alpaca place_order budget (%.0fs) exhausted for %s; giving up",
+                             time_budget, req.symbol)
+                break
+
             # Transient. If it's the spurious trading gate, restart the MCP client
-            # (a fresh client reliably clears it) before retrying.
-            if self._is_trading_disabled(resp):
+            # ONCE (a fresh client reliably clears it) before retrying.
+            if self._is_trading_disabled(resp) and not restarted:
+                restarted = True
                 log.warning("alpaca leg trading_disabled (attempt %d/%d); "
                              "restarting MCP client", attempt + 1, max_attempts)
                 try:

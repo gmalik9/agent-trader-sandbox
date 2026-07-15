@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     alpaca_max_retries: int = 4
     alpaca_retry_backoff: float = 1.0   # seconds, base for exponential backoff
     alpaca_retry_cap: float = 6.0       # max seconds per retry wait
+    # Overall wall-clock budget for one place_order retry sequence; caps how long
+    # a slow MCP restart + retries can block the scheduler tick.
+    alpaca_place_budget_seconds: float = 25.0
 
     # Broker
     broker_backend: str = Field(default="dual")  # 'sandbox' | 'alpaca_paper' | 'dual'
