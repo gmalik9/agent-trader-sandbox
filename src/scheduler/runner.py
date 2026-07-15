@@ -20,6 +20,7 @@ import os
 import signal
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -63,6 +64,10 @@ class SchedulerRunner:
                                             "misfire_grace_time": 60},
         )
         self._stop = threading.Event()
+        # Monotonic timestamp of the in-flight day tick (None when idle). The
+        # watchdog thread uses this to detect a hung tick that would otherwise
+        # block every future tick via max_instances=1.
+        self._day_tick_started_at: float | None = None
 
     # ---------------- lifecycle ----------------
 
@@ -231,10 +236,13 @@ class SchedulerRunner:
     def job_day_tick(self) -> None:
         if not is_market_open(now_utc()):
             return
+        self._day_tick_started_at = time.monotonic()
         try:
             self._day_agent().run_once()
         except Exception:
             log.exception("day_tick failed")
+        finally:
+            self._day_tick_started_at = None
 
     def job_long_tick(self) -> None:
         try:
@@ -307,6 +315,35 @@ class SchedulerRunner:
         self.scheduler.add_job(self.job_tick_poll,
                                  IntervalTrigger(seconds=5), id="tick_poll")
 
+    def _start_day_tick_watchdog(self) -> None:
+        """Self-healing guard against a hung day tick.
+
+        ``max_instances=1`` means a single day tick that hangs on an unbounded
+        network/MCP call blocks *every* future tick — the silent multi-hour stall
+        seen before. The internal LLM + placement deadlines bound the common
+        cases, but a truly stuck I/O call would still wedge the job slot. This
+        watchdog exits the process past a hard wall-clock bound so Docker
+        (``restart: unless-stopped``) brings up a fresh scheduler and trading
+        resumes — the same recovery as a manual restart, but automatic.
+        """
+        day_secs = max(5, int(getattr(self.settings, "day_tick_seconds", 60) or 60))
+        limit = max(240.0, day_secs * 3.0)
+
+        def _watch() -> None:
+            while not self._stop.wait(15.0):
+                started = self._day_tick_started_at
+                if started is None:
+                    continue
+                elapsed = time.monotonic() - started
+                if elapsed > limit:
+                    log.error("day_tick hung for %.0fs (limit %.0fs); exiting for "
+                               "a clean restart so trading resumes", elapsed, limit)
+                    os._exit(1)
+
+        t = threading.Thread(target=_watch, name="day-tick-watchdog", daemon=True)
+        t.start()
+        log.info("day-tick watchdog armed (hard limit %.0fs)", limit)
+
     def install_signals(self) -> None:
         def handler(signum, _frame):
             log.info("signal %s received; shutting down", signum)
@@ -324,6 +361,7 @@ class SchedulerRunner:
             self.setup()
             self.register_jobs()
             self.install_signals()
+            self._start_day_tick_watchdog()
             log.info("scheduler starting (broker=%s)", self.settings.broker_backend)
             self.scheduler.start()
         finally:
