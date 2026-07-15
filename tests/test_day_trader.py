@@ -77,6 +77,33 @@ def _propose(symbol="AAPL", entry=150.0, stop=148.0):
                     "thesis": "test"})])
 
 
+def _exit(symbol="AAPL", reason="rotate"):
+    return ChatResult(text=None, tool_calls=[ToolCall(
+        id="e1", name="exit_position",
+        arguments={"symbol": symbol, "reason": reason})])
+
+
+def test_agent_can_proactively_exit_position(tmp_db, stub_bars, monkeypatch):
+    """The agent can close a held position via the exit_position tool."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    from src import config
+    config.get_settings.cache_clear()
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="AAPL", side="buy", qty=10,
+                                     sub_account="day", agent="manual"))
+    assert broker.list_positions("day")                    # held before
+    prov = ScriptedProvider([_exit("AAPL", "rotate"), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
+    out = agent.run_once()
+    assert out.status == "ok"
+    assert broker.list_positions("day") == []              # agent closed it
+    assert any("agent_exit" in d for d in out.decisions)   # recorded
+    config.get_settings.cache_clear()
+
+
 def test_kill_switch_halts_immediately(tmp_db, stub_bars):
     dbm.set_setting(tmp_db, "kill_switch", "on")
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
@@ -509,6 +536,8 @@ def test_no_options_client_runs_fine(tmp_db, stub_bars):
 def test_max_concurrent_positions_rejects_extra(tmp_db, stub_bars, monkeypatch):
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
     monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_DEFAULT_STOP_PCT", "0")   # don't auto-close the seeded book
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")
     from src import config
     config.get_settings.cache_clear()
 
@@ -531,7 +560,7 @@ def test_max_concurrent_positions_rejects_extra(tmp_db, stub_bars, monkeypatch):
     # No 9th fill.
     assert not any(o["symbol"] == "FFF" and o["status"] == "filled" for o in out.orders)
     # Decision recorded with reject_reason.
-    rejected = [d for d in out.decisions if d["symbol"] == "FFF" and not d["accepted"]]
+    rejected = [d for d in out.decisions if d.get("symbol") == "FFF" and not d.get("accepted")]
     assert rejected and rejected[0]["reject_reason"] == "max_concurrent_positions"
 
 
@@ -641,8 +670,11 @@ def test_default_stop_backfills_plan_for_unplanned_position(tmp_db, stub_bars, m
     config.get_settings.cache_clear()
 
 
-def test_default_stop_off_by_default(tmp_db, stub_bars):
+def test_default_stop_off_by_default(tmp_db, stub_bars, monkeypatch):
     """With the default (0), no plan is fabricated for an unplanned position."""
+    monkeypatch.setenv("DAY_DEFAULT_STOP_PCT", "0")
+    from src import config
+    config.get_settings.cache_clear()
     stub_bars.set("AAA", o=100, h=101, l=99, c=100)
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
     from src.brokers.base import OrderRequest
@@ -653,6 +685,7 @@ def test_default_stop_off_by_default(tmp_db, stub_bars):
                             provider=ScriptedProvider([]), now=MARKET_OPEN)
     agent._manage_open_positions()
     assert not dbm.get_active_position_plans(tmp_db, aid)  # nothing fabricated
+    config.get_settings.cache_clear()
 
 
 def test_stop_monitor_retires_plan_when_flat(tmp_db, stub_bars):

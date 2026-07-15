@@ -281,6 +281,11 @@ RISK GUARDRAILS (SYSTEM-ENFORCED; STILL RESPECT CONCEPTUALLY)
 - DILIGENCE IS ENFORCED: a proposal is AUTO-REJECTED unless you called BOTH
   `get_news` AND `get_analyst_view` for that symbol this tick. Always run both
   before `propose_trade`. Skipping them wastes the tick.
+- MANAGE THE BOOK PROACTIVELY: you can `exit_position` any holding at any tick —
+  cut a loser before its stop, take a profit when the thesis is done, exit an
+  invalidated thesis, or FREE A SLOT when the book is full (8 positions) and a
+  clearly better setup is available. Review `current_positions` each tick and act
+  on what you hold, don't only hunt for new entries.
 
 ────────────────────────────────────────────────────────────────────────────
 REQUIRED JUSTIFICATION FOR EACH PROPOSAL
@@ -392,7 +397,7 @@ class DayTraderAgent(AgentBase):
 
         # Ask the LLM.
         try:
-            proposals, option_proposals, loop_res = self._run_llm_loop()
+            proposals, option_proposals, exits, loop_res = self._run_llm_loop()
         except RateLimitError as e:
             # Provider (and its fallback) are rate-limited this tick. Record a
             # visible no-op AND a throttle marker in settings so the UI can show
@@ -416,6 +421,8 @@ class DayTraderAgent(AgentBase):
         option_orders = self._place_options(option_proposals)
 
         all_decisions = [d.__dict__ for d in decisions] + option_orders
+        if exits:
+            all_decisions = [{"agent_exit": e} for e in exits] + all_decisions
         if stop_actions:
             all_decisions = [{"stop_exit": a} for a in stop_actions] + all_decisions
         rid = self._record_run(
@@ -576,6 +583,7 @@ class DayTraderAgent(AgentBase):
     def _run_llm_loop(self):
         proposals: list[_Proposal] = []
         option_proposals: list[_OptionProposal] = []
+        exits: list[dict] = []
         # Track which symbols actually received the mandatory diligence this tick
         # so _validate_and_size can reject proposals that skipped it (the observed
         # failure mode: trades placed without a get_analyst_view / get_news check).
@@ -674,6 +682,37 @@ class DayTraderAgent(AgentBase):
                                          thesis=thesis))
             return {"ok": True, "buffered": len(proposals)}
 
+        def exit_position(*, symbol: str, reason: str = "") -> dict:
+            """Proactively close a currently-held position (cut a loser, take a
+            profit, or free a slot to rotate into a better setup). Executes
+            immediately so a subsequent propose_trade this tick sees the freed
+            slot/cash."""
+            sym = str(symbol).upper()
+            try:
+                held = {p.symbol.upper(): p for p in self.broker.list_positions(self.sub_account)}
+            except Exception as e:
+                return {"error": f"positions_unavailable:{e}"}
+            if sym not in held or abs(held[sym].qty) <= 1e-9:
+                return {"error": "not_held", "symbol": sym}
+            try:
+                res = self.broker.close_position(sym, sub_account=self.sub_account,
+                                                  percentage=100.0)
+            except Exception as e:
+                return {"error": f"close_failed:{e}", "symbol": sym}
+            try:
+                aid = self._account_id()
+                for pl in dbm.get_active_position_plans(self.conn, aid):
+                    if str(pl["symbol"]).upper() == sym:
+                        dbm.close_position_plan(self.conn, pl["id"], "agent_exit")
+            except Exception:
+                log.debug("exit_position: plan retire failed for %s", sym, exc_info=True)
+            rec = {"symbol": sym, "reason": reason or "agent_exit",
+                    "status": getattr(res, "status", None),
+                    "order_id": getattr(res, "id", None)}
+            exits.append(rec)
+            log.info("agent proactively exited %s (%s)", sym, reason or "agent_exit")
+            return {"ok": True, **rec}
+
         def list_option_contracts(*, underlying: str, option_type: str = "call",
                                    limit: int = 15) -> dict:
             if self.options is None:
@@ -760,6 +799,16 @@ class DayTraderAgent(AgentBase):
                                   "stop_price": {"type": "number"},
                                   "thesis": {"type": "string"}}}),
                 fn=propose_trade),
+            ToolHandler(spec=ToolSpec(
+                name="exit_position",
+                description=("Immediately close a currently-held position. Use it to manage "
+                              "the book PROACTIVELY: cut a loser before its stop, lock in a "
+                              "profit, exit a thesis that's invalidated, or free a slot when "
+                              "the book is full and a clearly better setup is available. "
+                              "Closes 100% at market and retires its stop plan."),
+                json_schema={"type": "object", "required": ["symbol"], "properties": {
+                    "symbol": {"type": "string"},
+                    "reason": {"type": "string"}}}), fn=exit_position),
         ]
 
         if self.options is not None:
@@ -814,7 +863,7 @@ class DayTraderAgent(AgentBase):
         deadline = max(20.0, cadence * 0.8)
         loop_res = self._run_llm(SYSTEM_PROMPT, user, handlers, max_steps=8,
                                   deadline_seconds=deadline)
-        return proposals, option_proposals, loop_res
+        return proposals, option_proposals, exits, loop_res
 
     def _place_options(self, proposals: list[_OptionProposal]) -> list[dict]:
         """Place buffered option orders directly on Alpaca; record + return each."""

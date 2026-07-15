@@ -34,6 +34,10 @@ services:
       STOCK_REC_ALLOW_LEVERAGED: "true"
       STOCK_REC_MAX_ORDER_USD: "0"
       STOCK_REC_MAX_SYMBOL_PCT: "0"
+      # Catch-all protective stop (5% from avg cost + 2R target) for any held
+      # position lacking an explicit plan — protects the current book and lets
+      # the agent's stop monitor free slots as stops hit.
+      DAY_DEFAULT_STOP_PCT: "0.05"
     restart: unless-stopped
 
   web:
