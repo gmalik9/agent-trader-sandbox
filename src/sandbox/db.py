@@ -91,3 +91,42 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
         (key, value, now),
     )
+
+
+def upsert_position_plan(conn: sqlite3.Connection, *, account_id: int, symbol: str,
+                         side: str, entry_price: float, stop_price: float,
+                         target_price: float | None, agent: str) -> None:
+    """Record (or replace) the active stop plan for a position.
+
+    Any existing active plan for the same (account, symbol) is superseded so
+    there is exactly one active plan per open position — a re-entry or size-up
+    resets the stop to the latest one the agent set.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE position_plans SET active=0, closed_at=?, close_reason='superseded' "
+        "WHERE account_id=? AND symbol=? AND active=1",
+        (now, account_id, symbol.upper()),
+    )
+    conn.execute(
+        "INSERT INTO position_plans(account_id, symbol, side, entry_price, stop_price, "
+        "target_price, agent, active, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+        (account_id, symbol.upper(), side, float(entry_price), float(stop_price),
+         (float(target_price) if target_price is not None else None), agent, now, now),
+    )
+
+
+def get_active_position_plans(conn: sqlite3.Connection, account_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM position_plans WHERE account_id=? AND active=1 ORDER BY symbol",
+        (account_id,),
+    ).fetchall()
+
+
+def close_position_plan(conn: sqlite3.Connection, plan_id: int, reason: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE position_plans SET active=0, closed_at=?, close_reason=? WHERE id=?",
+        (now, reason, plan_id),
+    )

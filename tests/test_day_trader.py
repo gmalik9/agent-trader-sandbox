@@ -553,3 +553,97 @@ def test_daily_drawdown_halts(tmp_db, stub_bars):
                             provider=ScriptedProvider([]), now=MARKET_OPEN)
     out = agent.run_once()
     assert out.status == "halted" and out.error == "daily_drawdown"
+
+
+def test_stop_monitor_closes_long_when_stop_breached(tmp_db, stub_bars, monkeypatch):
+    """A held long whose live price has fallen through its stop is closed."""
+    stub_bars.set("AAA", o=100, h=101, l=99, c=100)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="AAA", side="buy", qty=50,
+                                     sub_account="day", agent="manual"))
+    aid = dbm.get_account_id(tmp_db, "day")
+    dbm.upsert_position_plan(tmp_db, account_id=aid, symbol="AAA", side="buy",
+                             entry_price=100.0, stop_price=95.0, target_price=110.0,
+                             agent="day")
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    # Live price 94 is below the 95 stop → should close.
+    monkeypatch.setattr(agent, "_latest_price", lambda s: 94.0)
+    actions = agent._manage_open_positions()
+    assert actions and actions[0]["reason"] == "stop_hit"
+    assert broker.list_positions("day") == []            # position closed
+    assert not dbm.get_active_position_plans(tmp_db, aid)  # plan retired
+
+
+def test_stop_monitor_holds_position_above_stop(tmp_db, stub_bars, monkeypatch):
+    """A held long still above its stop (and below target) is left alone."""
+    stub_bars.set("AAA", o=100, h=101, l=99, c=100)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="AAA", side="buy", qty=50,
+                                     sub_account="day", agent="manual"))
+    aid = dbm.get_account_id(tmp_db, "day")
+    dbm.upsert_position_plan(tmp_db, account_id=aid, symbol="AAA", side="buy",
+                             entry_price=100.0, stop_price=95.0, target_price=110.0,
+                             agent="day")
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    monkeypatch.setattr(agent, "_latest_price", lambda s: 101.0)  # between stop & target
+    actions = agent._manage_open_positions()
+    assert actions == []
+    assert broker.list_positions("day")                  # still open
+    assert dbm.get_active_position_plans(tmp_db, aid)     # plan still active
+
+
+def test_stop_monitor_takes_profit_at_target(tmp_db, stub_bars, monkeypatch):
+    """A held long that reaches its target is closed (take-profit)."""
+    stub_bars.set("AAA", o=100, h=101, l=99, c=100)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="AAA", side="buy", qty=50,
+                                     sub_account="day", agent="manual"))
+    aid = dbm.get_account_id(tmp_db, "day")
+    dbm.upsert_position_plan(tmp_db, account_id=aid, symbol="AAA", side="buy",
+                             entry_price=100.0, stop_price=95.0, target_price=110.0,
+                             agent="day")
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    monkeypatch.setattr(agent, "_latest_price", lambda s: 111.0)  # above target
+    actions = agent._manage_open_positions()
+    assert actions and actions[0]["reason"] == "target_hit"
+    assert broker.list_positions("day") == []
+
+
+def test_stop_monitor_retires_plan_when_flat(tmp_db, stub_bars):
+    """A plan for a symbol no longer held is retired without any close."""
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    aid = dbm.get_account_id(tmp_db, "day")
+    dbm.upsert_position_plan(tmp_db, account_id=aid, symbol="GONE", side="buy",
+                             entry_price=100.0, stop_price=95.0, target_price=110.0,
+                             agent="day")
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    actions = agent._manage_open_positions()
+    assert actions == []
+    assert not dbm.get_active_position_plans(tmp_db, aid)  # stale plan cleared
+
+
+def test_place_records_stop_plan(tmp_db, stub_bars, monkeypatch):
+    """Placing a sized trade persists an active stop plan the monitor can use."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    from src import config
+    config.get_settings.cache_clear()
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    prov = ScriptedProvider([_propose("AAPL", 150.0, 143.0), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
+    out = agent.run_once()
+    assert out.status == "ok"
+    aid = dbm.get_account_id(tmp_db, "day")
+    plans = dbm.get_active_position_plans(tmp_db, aid)
+    assert len(plans) == 1
+    assert plans[0]["symbol"] == "AAPL" and plans[0]["stop_price"] == 143.0
+    config.get_settings.cache_clear()
+

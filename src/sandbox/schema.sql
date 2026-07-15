@@ -107,3 +107,28 @@ CREATE TABLE IF NOT EXISTS dual_divergence (
 );
 
 CREATE INDEX IF NOT EXISTS idx_div_group ON dual_divergence(dual_group_id);
+
+-- Per-position trade plan: the stop (and optional take-profit target) the agent
+-- set at entry. The intraday stop monitor reads active rows every tick and
+-- closes any position whose live price has breached its stop. One active row per
+-- (account_id, symbol); superseded when the agent re-enters or the position goes
+-- flat.
+CREATE TABLE IF NOT EXISTS position_plans (
+  id            INTEGER PRIMARY KEY,
+  account_id    INTEGER NOT NULL REFERENCES accounts(id),
+  symbol        TEXT NOT NULL,
+  side          TEXT NOT NULL,                 -- 'buy' (long) | 'sell' (short)
+  entry_price   REAL NOT NULL,
+  stop_price    REAL NOT NULL,
+  target_price  REAL,
+  agent         TEXT NOT NULL,                 -- day|long
+  active        INTEGER NOT NULL DEFAULT 1,    -- 1=monitored, 0=closed/superseded
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  closed_at     TEXT,
+  close_reason  TEXT                            -- stop_hit|target_hit|flat|superseded
+);
+
+CREATE INDEX IF NOT EXISTS idx_plans_active ON position_plans(account_id, active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_active_sym
+  ON position_plans(account_id, symbol) WHERE active = 1;

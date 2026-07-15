@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # Set to 0 to disable the refresh job.
     scan_refresh_seconds: int = 600
     scan_refresh_timeout_seconds: float = 300.0  # client wait cap for one scan
+    # Intraday stop monitor. The day agent sets a stop at entry but nothing
+    # submits it as a live order, so a dedicated cheap job (no LLM) checks each
+    # open position's live price against its stop/target on this cadence and
+    # closes breached positions — catching fast moves between the slower LLM
+    # ticks. Set to 0 to disable.
+    stop_monitor_seconds: int = 30
     # Alpaca leg is the source of truth — retry transient order failures
     # (spurious trading_disabled, transport errors) before giving up.
     alpaca_max_retries: int = 4

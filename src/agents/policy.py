@@ -32,6 +32,8 @@ class Decision:
     order_type: str = "market"
     limit_price: float | None = None
     stop_price: float | None = None
+    entry_price: float | None = None
+    target_price: float | None = None
     thesis: str | None = None
     # populated by policy.validate()
     accepted: bool = True

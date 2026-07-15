@@ -244,6 +244,16 @@ class SchedulerRunner:
         finally:
             self._day_tick_started_at = None
 
+    def job_stop_monitor(self) -> None:
+        # Cheap, LLM-free guard: enforce each open day-position's stop/target
+        # between the slower ~2-min LLM ticks so fast moves are cut promptly.
+        if not is_market_open(now_utc()):
+            return
+        try:
+            self._day_agent().manage_positions_only()
+        except Exception:
+            log.exception("stop_monitor failed")
+
     def job_scan_refresh(self) -> None:
         # Refresh the intraday scanner cache so list_ideas returns FRESH ideas
         # (and prices) instead of the last scan. Without this the idea universe
@@ -339,6 +349,13 @@ class SchedulerRunner:
                                      id="scan_refresh", max_instances=1, coalesce=True,
                                      next_run_time=now_utc())
             log.info("scan_refresh cadence: every %ds", max(60, scan_secs))
+        # Fast, LLM-free stop monitor between the slower day ticks.
+        stop_secs = int(getattr(self.settings, "stop_monitor_seconds", 30) or 0)
+        if stop_secs > 0:
+            self.scheduler.add_job(self.job_stop_monitor,
+                                     IntervalTrigger(seconds=max(10, stop_secs)),
+                                     id="stop_monitor", max_instances=1, coalesce=True)
+            log.info("stop_monitor cadence: every %ds", max(10, stop_secs))
         self.scheduler.add_job(self.job_long_tick,
                                  CronTrigger(hour=21, minute=30), id="long_tick")
         self.scheduler.add_job(self.job_coord_tick,

@@ -31,7 +31,7 @@ def test_register_jobs_attaches_expected_ids(runner):
     runner.register_jobs()
     job_ids = {j.id for j in runner.scheduler.get_jobs()}
     assert job_ids == {"mtm", "reconcile", "day_tick", "scan_refresh",
-                        "long_tick", "coord_tick", "tick_poll"}
+                        "stop_monitor", "long_tick", "coord_tick", "tick_poll"}
 
 
 def test_tick_poll_consumes_request_and_dispatches(runner, monkeypatch):
@@ -103,3 +103,20 @@ def test_scan_refresh_skips_when_market_closed(runner, monkeypatch):
     runner.short_term = st
     runner.job_scan_refresh()
     st.scan_run.assert_not_called()
+
+
+def test_stop_monitor_runs_agent_manager(runner, monkeypatch):
+    """The stop_monitor job invokes the day agent's LLM-free position manager."""
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: True)
+    fake_day = MagicMock()
+    monkeypatch.setattr(runner, "_day_agent", lambda: fake_day)
+    runner.job_stop_monitor()
+    fake_day.manage_positions_only.assert_called_once()
+
+
+def test_stop_monitor_skips_when_market_closed(runner, monkeypatch):
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: False)
+    fake_day = MagicMock()
+    monkeypatch.setattr(runner, "_day_agent", lambda: fake_day)
+    runner.job_stop_monitor()
+    fake_day.manage_positions_only.assert_not_called()

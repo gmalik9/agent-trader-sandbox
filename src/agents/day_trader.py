@@ -376,6 +376,11 @@ class DayTraderAgent(AgentBase):
                                     latency_ms=time_ms() - start)
             return RunOutcome(status="no-op", run_id=rid)
 
+        # Enforce stops/targets on anything already open BEFORE looking for new
+        # trades, so a losing position is cut promptly rather than riding until
+        # the 15:55 force-flat.
+        stop_actions = self._manage_open_positions()
+
         # Ask the LLM.
         try:
             proposals, option_proposals, loop_res = self._run_llm_loop()
@@ -402,6 +407,8 @@ class DayTraderAgent(AgentBase):
         option_orders = self._place_options(option_proposals)
 
         all_decisions = [d.__dict__ for d in decisions] + option_orders
+        if stop_actions:
+            all_decisions = [{"stop_exit": a} for a in stop_actions] + all_decisions
         rid = self._record_run(
             status="ok", prompt=SYSTEM_PROMPT[:200], response=loop_res.final_text,
             tools_called=[asdict_step(s) for s in loop_res.steps],
@@ -438,6 +445,72 @@ class DayTraderAgent(AgentBase):
             orders.append({"id": res.id, "symbol": p.symbol, "status": res.status,
                             "fill_price": res.fill_price})
         return decisions, orders
+
+    def _manage_open_positions(self) -> list[dict]:
+        """Enforce each open position's stop (and take-profit target).
+
+        The agent sets a stop at entry but nothing submits it as a live order, so
+        without this a position rides unmanaged until the 15:55 force-flat. Every
+        time this runs we compare each held position's LIVE price against its
+        recorded plan and close the position when the stop (or target) is
+        breached. Plans for positions that are already flat are retired.
+        """
+        actions: list[dict] = []
+        try:
+            aid = self._account_id()
+            plans = dbm.get_active_position_plans(self.conn, aid)
+        except Exception:
+            log.exception("stop monitor: failed to load plans")
+            return actions
+        if not plans:
+            return actions
+        try:
+            positions = {p.symbol.upper(): p for p in self.broker.list_positions(self.sub_account)}
+        except Exception:
+            log.exception("stop monitor: failed to load positions")
+            return actions
+        for plan in plans:
+            sym = str(plan["symbol"]).upper()
+            pos = positions.get(sym)
+            qty = abs(pos.qty) if pos else 0.0
+            if not pos or qty <= 1e-9:
+                dbm.close_position_plan(self.conn, plan["id"], "flat")
+                continue
+            price = self._latest_price(sym)
+            if price is None or price <= 0:
+                continue
+            side = str(plan["side"])
+            stop = float(plan["stop_price"])
+            target = plan["target_price"]
+            is_long = side == "buy"
+            hit_stop = (price <= stop) if is_long else (price >= stop)
+            hit_target = (target is not None and
+                          ((price >= float(target)) if is_long else (price <= float(target))))
+            if not (hit_stop or hit_target):
+                continue
+            reason = "stop_hit" if hit_stop else "target_hit"
+            try:
+                res = self.broker.close_position(sym, sub_account=self.sub_account,
+                                                  percentage=100.0)
+                dbm.close_position_plan(self.conn, plan["id"], reason)
+                log.info("stop monitor: closed %s (%s) live=%.4f stop=%.4f target=%s",
+                          sym, reason, price, stop, target)
+                actions.append({"symbol": sym, "reason": reason, "price": price,
+                                 "stop": stop, "target": target,
+                                 "order_id": getattr(res, "id", None),
+                                 "status": getattr(res, "status", None)})
+            except Exception:
+                log.exception("stop monitor: failed to close %s", sym)
+        return actions
+
+    def manage_positions_only(self) -> list[dict]:
+        """Run ONLY the stop monitor (no LLM). Used by the fast scheduler job so
+        stops are checked between the slower LLM ticks. Respects the kill-switch
+        and market hours."""
+        if self._kill_switched() or not is_market_open(self._wall()):
+            return []
+        return self._manage_open_positions()
+
 
     def _run_llm_loop(self):
         proposals: list[_Proposal] = []
@@ -869,7 +942,8 @@ class DayTraderAgent(AgentBase):
         slots_left = MAX_CONCURRENT_POSITIONS - len(material_syms)
 
         for p in proposals:
-            d = Decision(symbol=p.symbol, side=p.side, qty=0.0, thesis=p.thesis)
+            d = Decision(symbol=p.symbol, side=p.side, qty=0.0, thesis=p.thesis,
+                         entry_price=p.entry_price, stop_price=p.stop_price)
             is_short = p.side == "sell"
             if slots_left <= 0 and p.symbol not in material_syms:
                 d.accepted = False
@@ -971,7 +1045,34 @@ class DayTraderAgent(AgentBase):
             ))
             orders.append({"id": res.id, "symbol": d.symbol, "status": res.status,
                             "fill_price": res.fill_price})
+            # Persist the stop plan so the intraday monitor can enforce it. The
+            # order it protects is the one we're actually holding: for a short
+            # (converted to a long of the inverse ETF upstream), the plan tracks
+            # the symbol/side we submitted here.
+            if str(res.status) in ("filled", "routed_external") and d.stop_price:
+                self._record_plan(d, fill_price=res.fill_price)
         return orders
+
+    def _record_plan(self, d: Decision, *, fill_price: float | None) -> None:
+        try:
+            aid = self._account_id()
+            entry = fill_price if fill_price else d.entry_price
+            if not entry or not d.stop_price:
+                return
+            # Derive a take-profit target at 2R if the agent didn't set one, to
+            # honour the ~2:1 reward:risk mandate (long: above entry, short: below).
+            target = d.target_price
+            if target is None:
+                risk = abs(float(entry) - float(d.stop_price))
+                target = (float(entry) + 2 * risk if d.side == "buy"
+                          else float(entry) - 2 * risk)
+            dbm.upsert_position_plan(
+                self.conn, account_id=aid, symbol=d.symbol, side=d.side,
+                entry_price=float(entry), stop_price=float(d.stop_price),
+                target_price=float(target), agent=self.name)
+        except Exception:
+            log.exception("failed to record stop plan for %s", d.symbol)
+
 
 
 def asdict_step(s) -> dict:
