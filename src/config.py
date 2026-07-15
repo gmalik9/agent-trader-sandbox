@@ -132,6 +132,12 @@ class Settings(BaseSettings):
     #    idea list, forcing the agent to rotate into DIFFERENT names each tick.
     day_theme_max_pct: float = 0.35      # ≤35% of equity per correlation theme
     day_name_cooldown_seconds: int = 600  # 10 min per-name cooldown (0 disables)
+    # Mandatory diligence: reject any new trade whose symbol did not receive BOTH
+    # a get_news and a get_analyst_view call this tick. The checklist marks these
+    # "required"; without enforcement the model skips them under time pressure and
+    # the low-diligence proposals are exactly the low-quality trades. Set False to
+    # revert to advisory-only.
+    day_require_diligence: bool = True
 
 
 @lru_cache(maxsize=1)

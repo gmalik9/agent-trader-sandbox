@@ -270,8 +270,17 @@ RISK GUARDRAILS (SYSTEM-ENFORCED; STILL RESPECT CONCEPTUALLY)
 ────────────────────────────────────────────────────────────────────────────
 - Position sizing targets ~1% account risk to stop.
 - Per-order/per-symbol notional caps enforced.
-- Max 5 concurrent positions and leverage/gross caps enforced.
+- Max 8 concurrent positions and per-theme caps enforced.
 - Even if enforced automatically, do not propose reckless structures.
+- STOPS ARE NOW LIVE: a monitor checks every open position against its stop (and
+  a 2:1 take-profit target) every ~30s and closes it the moment either is hit.
+  The `stop_price` you set is therefore REAL protection, not a note — so a
+  qualified setup with a sensible stop is genuinely defined-risk. Act decisively
+  on real edges (a well-structured SHORT with a stop is as valid as a long); do
+  not sit idle when a checklist-passing setup with good R:R is in front of you.
+- DILIGENCE IS ENFORCED: a proposal is AUTO-REJECTED unless you called BOTH
+  `get_news` AND `get_analyst_view` for that symbol this tick. Always run both
+  before `propose_trade`. Skipping them wastes the tick.
 
 ────────────────────────────────────────────────────────────────────────────
 REQUIRED JUSTIFICATION FOR EACH PROPOSAL
@@ -515,6 +524,11 @@ class DayTraderAgent(AgentBase):
     def _run_llm_loop(self):
         proposals: list[_Proposal] = []
         option_proposals: list[_OptionProposal] = []
+        # Track which symbols actually received the mandatory diligence this tick
+        # so _validate_and_size can reject proposals that skipped it (the observed
+        # failure mode: trades placed without a get_analyst_view / get_news check).
+        self._news_checked: set[str] = set()
+        self._analyst_checked: set[str] = set()
 
         def list_intraday_ideas(*, tier: str = "A", limit: int = 10) -> dict:
             # Auto-broaden: the scanner often has zero tier-A (and B) setups on a
@@ -585,9 +599,11 @@ class DayTraderAgent(AgentBase):
             return _summarize_quote(symbol, raw)
 
         def get_news(symbol: str, *, days: int = 2) -> dict:
+            self._news_checked.add(str(symbol).upper())
             return self._news(symbol, days=days)
 
         def get_analyst_view(symbol: str) -> dict:
+            self._analyst_checked.add(str(symbol).upper())
             return self._analyst_view(symbol)
 
         def current_positions() -> list[dict]:
@@ -950,6 +966,25 @@ class DayTraderAgent(AgentBase):
                 d.reject_reason = "max_concurrent_positions"
                 out.append(d)
                 continue
+            # Mandatory diligence gate: the pre-trade checklist requires a
+            # get_news AND get_analyst_view for every serious candidate. Enforce
+            # it so the model can't place a trade that skipped the homework (the
+            # observed failure mode). Only active on real LLM ticks (the tracking
+            # sets exist); direct _validate_and_size calls are unaffected. A short
+            # is diligenced on the original leveraged ETF, then substituted to its
+            # inverse, so accept diligence on either the symbol or its inverse.
+            require_diligence = bool(getattr(s, "day_require_diligence", True))
+            news_checked = getattr(self, "_news_checked", None)
+            if require_diligence and news_checked is not None:
+                analyst_checked = getattr(self, "_analyst_checked", set())
+                orig = INVERSE_ETF.get(p.symbol)
+                did_news = p.symbol in news_checked or (orig in news_checked)
+                did_analyst = p.symbol in analyst_checked or (orig in analyst_checked)
+                if not (did_news and did_analyst):
+                    d.accepted = False
+                    d.reject_reason = "insufficient_diligence"
+                    out.append(d)
+                    continue
             # Correlation-theme cap: don't let one theme (e.g. all semis) exceed
             # DAY_THEME_MAX_PCT of equity — holding SOXL+NVDL+SMH is one bet, not
             # diversification. Reject when the theme is already full.

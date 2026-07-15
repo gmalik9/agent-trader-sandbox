@@ -177,6 +177,7 @@ def test_e2e_trade_lands_on_alpaca_and_mirrors_to_sandbox(tmp_db, stub_bars, mon
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
     monkeypatch.setenv("COMMISSION_BPS", "0")
     monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")  # not a diligence test
     monkeypatch.setenv("DAY_NAME_COOLDOWN_SECONDS", "0")   # no cooldown for this test
     from src import config
     config.get_settings.cache_clear()
@@ -230,6 +231,7 @@ def test_e2e_theme_cap_blocks_correlated_second_name(tmp_db, stub_bars, monkeypa
     monkeypatch.setenv("COMMISSION_BPS", "0")
     monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
     monkeypatch.setenv("DAY_THEME_MAX_PCT", "0.35")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")  # not a diligence test
     monkeypatch.setenv("DAY_NAME_COOLDOWN_SECONDS", "0")
     from src import config
     config.get_settings.cache_clear()
@@ -258,6 +260,7 @@ def test_e2e_per_name_cap_position_aware(tmp_db, stub_bars, monkeypatch):
     monkeypatch.setenv("COMMISSION_BPS", "0")
     monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
     monkeypatch.setenv("DAY_THEME_MAX_PCT", "0")   # isolate the per-name cap
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")  # not a diligence test
     monkeypatch.setenv("DAY_NAME_COOLDOWN_SECONDS", "0")
     from src import config
     config.get_settings.cache_clear()
@@ -301,6 +304,7 @@ def test_e2e_short_leveraged_etf_becomes_long_inverse_on_alpaca(tmp_db, stub_bar
     monkeypatch.setenv("COMMISSION_BPS", "0")
     monkeypatch.setenv("DAY_MAX_POSITION_PCT", "0.20")
     monkeypatch.setenv("DAY_THEME_MAX_PCT", "0")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")  # not a diligence test
     monkeypatch.setenv("DAY_NAME_COOLDOWN_SECONDS", "0")
     from src import config
     config.get_settings.cache_clear()

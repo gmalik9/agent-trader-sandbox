@@ -105,6 +105,7 @@ def test_happy_path_proposes_sizes_and_places(tmp_db, stub_bars, monkeypatch):
     # Zero slippage/commission for predictable cash math.
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
     monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")  # sizing test, not diligence
     from src import config
     config.get_settings.cache_clear()
 
@@ -629,10 +630,52 @@ def test_stop_monitor_retires_plan_when_flat(tmp_db, stub_bars):
     assert not dbm.get_active_position_plans(tmp_db, aid)  # stale plan cleared
 
 
+def test_diligence_gate_rejects_undiligenced_proposal(tmp_db, stub_bars, monkeypatch):
+    """A proposal whose symbol skipped get_news/get_analyst_view is rejected."""
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "true")
+    from src import config
+    config.get_settings.cache_clear()
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars, mirror=True)
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    from src.agents.day_trader import _Proposal
+    # Tracking active this tick, but AAPL was never diligenced.
+    agent._news_checked = set()
+    agent._analyst_checked = set()
+    ds = agent._validate_and_size(
+        [_Proposal(symbol="AAPL", entry_price=150.0, stop_price=143.0,
+                    side="buy", thesis="no homework")])
+    assert not ds[0].accepted
+    assert ds[0].reject_reason == "insufficient_diligence"
+    config.get_settings.cache_clear()
+
+
+def test_diligence_gate_allows_fully_diligenced_proposal(tmp_db, stub_bars, monkeypatch):
+    """A proposal whose symbol got both news + analyst checks passes the gate."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "true")
+    from src import config
+    config.get_settings.cache_clear()
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars, mirror=True)
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    from src.agents.day_trader import _Proposal
+    agent._news_checked = {"AAPL"}
+    agent._analyst_checked = {"AAPL"}
+    ds = agent._validate_and_size(
+        [_Proposal(symbol="AAPL", entry_price=150.0, stop_price=143.0,
+                    side="buy", thesis="did homework")])
+    assert ds[0].accepted and ds[0].reject_reason != "insufficient_diligence"
+    config.get_settings.cache_clear()
+
+
 def test_place_records_stop_plan(tmp_db, stub_bars, monkeypatch):
     """Placing a sized trade persists an active stop plan the monitor can use."""
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
     monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")
     from src import config
     config.get_settings.cache_clear()
     stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
