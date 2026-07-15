@@ -657,8 +657,12 @@ with tabs[0]:
     if not orders.empty:
         fp = pd.to_numeric(orders["fill_price"], errors="coerce")
         qt = pd.to_numeric(orders["qty"], errors="coerce")
+        fee = pd.to_numeric(orders["fees"], errors="coerce").fillna(0.0)
         filled = orders["status"].astype(str).eq("filled")
         orders["spend"] = (fp * qt).where(filled, 0.0).fillna(0.0).round(2)
+        # Net price = filled qty × fill price + fees (all-in cash cost of the
+        # order). 0 for unfilled/rejected rows.
+        orders["net_price"] = ((fp * qt) + fee).where(filled, 0.0).fillna(0.0).round(2)
     st.dataframe(
         _readable_ts_column(orders), use_container_width=True, hide_index=True,
         column_config={
@@ -668,12 +672,45 @@ with tabs[0]:
                 "Spend", format="$%.2f",
                 help="Money deployed on this order (filled qty × fill price). "
                      "0 for unfilled or rejected orders."),
+            "net_price": st.column_config.NumberColumn(
+                "Net price", format="$%.2f",
+                help="All-in cash cost of the order: filled qty × fill price + fees. "
+                     "0 for unfilled or rejected orders."),
             "fees": st.column_config.NumberColumn("Fees", format="$%.2f"),
             "status": st.column_config.TextColumn(
                 "Status", help="filled = executed on the sandbox; routed_external = sent "
                                "to Alpaca paper; rejected = blocked by a risk cap or no bar."),
         },
     )
+
+    # Total cost of holdings that are still OPEN (not squared off). Per symbol we
+    # net buys against sells: a symbol whose net quantity has returned to ~0 has
+    # been closed out and is excluded. The remaining net cash cost (buy notional −
+    # sell proceeds + fees) is the cost basis of what's still held. We total PER
+    # VENUE because the sandbox is a mirror of the Alpaca leg — summing both would
+    # double-count the same holdings.
+    open_cost = df(
+        "SELECT venue, symbol, "
+        "SUM(CASE WHEN side='buy' THEN qty ELSE -qty END) AS net_qty, "
+        "SUM(CASE WHEN side='buy' THEN qty*COALESCE(fill_price,0) "
+        "         ELSE -qty*COALESCE(fill_price,0) END) "
+        "  + SUM(COALESCE(fees,0)) AS net_cost "
+        "FROM orders WHERE status='filled' GROUP BY venue, symbol"
+    )
+    if not open_cost.empty:
+        still_open = open_cost[open_cost["net_qty"].round(4) != 0.0]
+        by_venue = still_open.groupby("venue")["net_cost"].sum()
+        alpaca_cost = float(by_venue.get("alpaca_paper", 0.0))
+        sandbox_cost = float(by_venue.get("sandbox", 0.0))
+        oc1, oc2 = st.columns(2)
+        oc1.metric(
+            "Open holdings cost (Alpaca)", f"${alpaca_cost:,.2f}",
+            help="Net cash cost (buys − sells + fees) of positions still open on the "
+                 "live Alpaca leg. Symbols fully squared off are excluded.")
+        oc2.metric(
+            "Open holdings cost (sandbox mirror)", f"${sandbox_cost:,.2f}",
+            help="Same figure for the local sandbox mirror. Should track the Alpaca leg; "
+                 "large gaps flag unreconciled fills.")
 
     # Per-symbol spend summary (filled orders only), with a grand total. Buys add
     # exposure, sells reduce it, so we net them per symbol per venue.
