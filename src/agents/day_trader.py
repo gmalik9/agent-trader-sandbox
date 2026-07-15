@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timezone
@@ -114,6 +115,18 @@ for _theme, _members in {
 def _theme_of(symbol: str) -> str:
     """Correlation theme for a symbol, or the symbol itself if standalone."""
     return THEME_GROUPS.get((symbol or "").upper(), (symbol or "").upper())
+
+
+# OCC option symbols (e.g. "F260717C00016000" = root + YYMMDD + C/P + strike).
+# These are held on Alpaca but CANNOT be closed via the stock close_position
+# endpoint, so the day agent must skip them in its stock-close paths (they expire
+# on their own; the options venue manages them separately).
+_OCC_OPTION_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
+
+
+def _is_option_symbol(symbol: str) -> bool:
+    return bool(_OCC_OPTION_RE.match((symbol or "").upper()))
+
 
 SYSTEM_PROMPT = """You are "Atlas-Day", an elite discretionary intraday trader operating a PAPER trading account.
 Your sole objective is to maximize risk-adjusted equity growth TODAY while preserving capital.
@@ -454,6 +467,10 @@ class DayTraderAgent(AgentBase):
         for p in positions:
             if p.qty <= 0:
                 continue
+            # Options can't be closed via the stock endpoint; they expire on
+            # their own and are managed on the options venue.
+            if _is_option_symbol(p.symbol):
+                continue
             decisions.append({"symbol": p.symbol, "side": "sell", "qty": p.qty,
                                "reason": "force_flat"})
             res = self.broker.close_position(p.symbol, sub_account=self.sub_account,
@@ -738,6 +755,10 @@ class DayTraderAgent(AgentBase):
             immediately so a subsequent propose_trade this tick sees the freed
             slot/cash."""
             sym = str(symbol).upper()
+            if _is_option_symbol(sym):
+                return {"error": "option_not_closable_here", "symbol": sym,
+                        "detail": "Options expire on their own and can't be closed "
+                                   "via the stock endpoint; do not exit them here."}
             try:
                 held = {p.symbol.upper(): p for p in self.broker.list_positions(self.sub_account)}
             except Exception as e:

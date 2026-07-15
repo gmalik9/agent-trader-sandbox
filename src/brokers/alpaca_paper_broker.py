@@ -273,13 +273,7 @@ class AlpacaPaperBroker(BrokerBase):
             (aid, now_s, symbol.upper(), now_s, self.name),
         )
         oid = cur.lastrowid
-        try:
-            resp = self.mcp.close_position(symbol.upper(), percentage=int(percentage))
-        except Exception:
-            log.exception("alpaca close_position failed for %s", symbol)
-            self.conn.execute("UPDATE orders SET status='rejected' WHERE id=?", (oid,))
-            return OrderResult(id=oid, external_id=None, status="rejected",
-                               fill_price=None, fees=0.0, venue=self.name)
+        resp = self._close_via_mcp(symbol.upper(), percentage)
         ext_id = str(resp.get("order_id") or resp.get("id") or "") if isinstance(resp, dict) else ""
         blocked = isinstance(resp, dict) and ("blocked" in resp or "error" in resp)
         if blocked or not ext_id:
@@ -297,6 +291,66 @@ class AlpacaPaperBroker(BrokerBase):
         )
         return OrderResult(id=oid, external_id=ext_id or None, status=status,
                            fill_price=None, fees=0.0, venue=self.name)
+
+    def _close_via_mcp(self, symbol: str, percentage: float) -> dict:
+        """Close a position through the upstream MCP, retrying TRANSIENT failures.
+
+        Closes are risk-reducing (stop-losses, exits, force-flat), so a spurious
+        `trading_disabled` or transport error must NOT be allowed to abandon the
+        close and leave the position open. Mirrors `_place_via_mcp`: restart the
+        MCP client once on `trading_disabled`, retry transient errors with
+        backoff, bail on a permanent reject (e.g. position already flat), and
+        respect an overall wall-clock budget so a tick isn't blocked for minutes.
+        """
+        s = get_settings()
+        max_attempts = max(1, int(getattr(s, "alpaca_max_retries", 4) or 1))
+        backoff = float(getattr(s, "alpaca_retry_backoff", 1.0) or 1.0)
+        cap = float(getattr(s, "alpaca_retry_cap", 6.0) or 6.0)
+        time_budget = float(getattr(s, "alpaca_place_budget_seconds", 25.0) or 25.0)
+
+        started = time.monotonic()
+        restarted = False
+        last_resp: dict = {}
+        for attempt in range(max_attempts):
+            try:
+                resp = self.mcp.close_position(symbol, percentage=int(percentage))
+            except Exception:
+                log.warning("alpaca close_position transport error (attempt %d/%d) for %s",
+                             attempt + 1, max_attempts, symbol, exc_info=True)
+                resp = {}
+            last_resp = resp if isinstance(resp, dict) else {}
+
+            ext_id = (str(resp.get("order_id") or resp.get("id") or "")
+                      if isinstance(resp, dict) else "")
+            if ext_id and not self._is_trading_disabled(resp):
+                return resp  # close accepted by Alpaca
+
+            if self._is_permanent_reject(resp):
+                return resp  # e.g. position already flat / not closable — retry won't help
+
+            if time.monotonic() - started > time_budget:
+                log.warning("alpaca close_position budget (%.0fs) exhausted for %s; giving up",
+                             time_budget, symbol)
+                break
+
+            if self._is_trading_disabled(resp) and not restarted:
+                restarted = True
+                log.warning("alpaca close_position trading_disabled (attempt %d/%d); "
+                             "restarting MCP client", attempt + 1, max_attempts)
+                try:
+                    self.mcp.stop()
+                except Exception:
+                    log.debug("mcp.stop() during close self-heal failed", exc_info=True)
+                try:
+                    self.mcp.start()
+                except Exception:
+                    log.exception("mcp.start() during close self-heal failed")
+            if attempt < max_attempts - 1:
+                time.sleep(min(backoff * (2 ** attempt), cap))
+        log.error("alpaca close_position failed after %d attempts for %s: %s",
+                   max_attempts, symbol, str(last_resp)[:160])
+        return last_resp
+
 
     def mark_to_market(self, now: datetime, sub_account: str = "day") -> AccountSnapshot:
         aid = dbm.get_account_id(self.conn, _SUB_TO_ACCOUNT.get(sub_account, sub_account))

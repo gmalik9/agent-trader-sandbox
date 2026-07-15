@@ -109,6 +109,25 @@ def test_agent_can_proactively_exit_position(tmp_db, stub_bars, monkeypatch):
     config.get_settings.cache_clear()
 
 
+def test_is_option_symbol_detects_occ():
+    from src.agents.day_trader import _is_option_symbol
+    assert _is_option_symbol("F260717C00016000")      # OCC option
+    assert _is_option_symbol("AAPL250620C00190000")
+    assert not _is_option_symbol("AAPL")              # stock
+    assert not _is_option_symbol("SOXS")              # ETF
+
+
+def test_exit_position_refuses_option_symbol(tmp_db, stub_bars):
+    """The agent must not try to close an option via the stock endpoint."""
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    prov = ScriptedProvider([_exit("F260717C00016000", "worthless"), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
+    out = agent.run_once()
+    assert out.status == "ok"
+    # No agent_exit recorded for the option (it was refused, not closed).
+    assert not any("agent_exit" in d for d in out.decisions)
+
+
 def test_kill_switch_halts_immediately(tmp_db, stub_bars):
     dbm.set_setting(tmp_db, "kill_switch", "on")
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)

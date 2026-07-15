@@ -127,3 +127,50 @@ def test_alpaca_get_account_maps_sub_account_name(tmp_db):
     snap = b.get_account("day")
     assert snap.name == "day_alpaca" and snap.venue == "alpaca_paper"
     assert snap.equity == 50_000.0 and snap.cash == 10_000.0
+
+
+class FlakyCloseMCP(FakeMCP):
+    """close_position returns trading_disabled for the first `flaky` calls, then
+    accepts — models the spurious gate that also hits closes."""
+
+    def __init__(self, flaky: int = 2):
+        super().__init__()
+        self.flaky = flaky
+        self.closes = 0
+
+    def close_position(self, symbol, percentage=100):
+        self.closes += 1
+        if self.closes <= self.flaky:
+            return {"blocked": "trading_disabled", "message": "spurious"}
+        return {"order_id": "close-ok", "status": "accepted"}
+
+
+def test_alpaca_close_position_retries_transient_then_succeeds(tmp_db):
+    # A stop-loss / exit close must NOT be abandoned on a spurious trading_disabled
+    # — it should self-heal (restart MCP) and retry, like place_order does.
+    mcp = FlakyCloseMCP(flaky=2)
+    b = AlpacaPaperBroker(mcp, conn=tmp_db)
+    res = b.close_position("AAPL", sub_account="day")
+    assert res.status == "accepted" and res.external_id == "close-ok"
+    assert mcp.closes == 3         # two transient blocks retried, third accepted
+    assert mcp.restarts >= 1       # MCP client restarted to clear the gate
+    row = tmp_db.execute("SELECT status FROM orders WHERE id=?", (res.id,)).fetchone()
+    assert row["status"] == "accepted"
+
+
+class OutageCloseMCP(FakeMCP):
+    """close_position raises a transport error every time (persistent outage)."""
+
+    def close_position(self, symbol, percentage=100):
+        self.closes = getattr(self, "closes", 0) + 1
+        raise RuntimeError("simulated close outage")
+
+
+def test_alpaca_close_position_retries_transport_errors_then_rejects(tmp_db):
+    mcp = OutageCloseMCP()
+    b = AlpacaPaperBroker(mcp, conn=tmp_db)
+    res = b.close_position("AAPL", sub_account="day")
+    # Persistent outage → eventually rejected, but only AFTER multiple attempts.
+    assert res.status == "rejected"
+    assert mcp.closes >= 2         # retried, not a single give-up
+
