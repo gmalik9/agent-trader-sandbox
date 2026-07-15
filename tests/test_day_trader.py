@@ -616,6 +616,45 @@ def test_stop_monitor_takes_profit_at_target(tmp_db, stub_bars, monkeypatch):
     assert broker.list_positions("day") == []
 
 
+def test_default_stop_backfills_plan_for_unplanned_position(tmp_db, stub_bars, monkeypatch):
+    """With DAY_DEFAULT_STOP_PCT>0, a held position lacking a plan gets one."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_DEFAULT_STOP_PCT", "0.05")
+    from src import config
+    config.get_settings.cache_clear()
+    stub_bars.set("AAA", o=100, h=101, l=99, c=100)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="AAA", side="buy", qty=50,
+                                     sub_account="day", agent="manual"))
+    aid = dbm.get_account_id(tmp_db, "day")
+    assert not dbm.get_active_position_plans(tmp_db, aid)  # no plan yet
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    monkeypatch.setattr(agent, "_latest_price", lambda s: 100.0)  # at entry, no breach
+    agent._manage_open_positions()
+    plans = dbm.get_active_position_plans(tmp_db, aid)
+    assert len(plans) == 1
+    assert plans[0]["symbol"] == "AAA" and plans[0]["side"] == "buy"
+    assert abs(plans[0]["stop_price"] - 95.0) < 0.01   # 5% below the $100 avg cost
+    config.get_settings.cache_clear()
+
+
+def test_default_stop_off_by_default(tmp_db, stub_bars):
+    """With the default (0), no plan is fabricated for an unplanned position."""
+    stub_bars.set("AAA", o=100, h=101, l=99, c=100)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    from src.brokers.base import OrderRequest
+    broker.place_order(OrderRequest(symbol="AAA", side="buy", qty=50,
+                                     sub_account="day", agent="manual"))
+    aid = dbm.get_account_id(tmp_db, "day")
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    agent._manage_open_positions()
+    assert not dbm.get_active_position_plans(tmp_db, aid)  # nothing fabricated
+
+
 def test_stop_monitor_retires_plan_when_flat(tmp_db, stub_bars):
     """A plan for a symbol no longer held is retired without any close."""
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)

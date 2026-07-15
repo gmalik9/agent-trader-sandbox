@@ -138,6 +138,13 @@ class Settings(BaseSettings):
     # the low-diligence proposals are exactly the low-quality trades. Set False to
     # revert to advisory-only.
     day_require_diligence: bool = True
+    # Catch-all protective stop for any HELD position that has no explicit plan
+    # (e.g. opened manually, or before the plan feature existed). The stop monitor
+    # backfills a stop this % from avg cost (and a 2R target) so every position is
+    # protected, not just freshly-proposed ones. Default 0 = OFF (don't fabricate
+    # stops on positions whose intended stop we don't know). Set e.g. 0.05 for a
+    # 5% safety-net stop.
+    day_default_stop_pct: float = 0.0
 
 
 @lru_cache(maxsize=1)

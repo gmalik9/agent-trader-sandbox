@@ -471,12 +471,17 @@ class DayTraderAgent(AgentBase):
         except Exception:
             log.exception("stop monitor: failed to load plans")
             return actions
-        if not plans:
-            return actions
         try:
             positions = {p.symbol.upper(): p for p in self.broker.list_positions(self.sub_account)}
         except Exception:
             log.exception("stop monitor: failed to load positions")
+            return actions
+        # Backfill a catch-all protective stop for any held position lacking a
+        # plan (opt-in via DAY_DEFAULT_STOP_PCT) so nothing rides completely
+        # unmanaged, then reload so the freshly-added plans are checked this pass.
+        if self._ensure_default_stops(aid, list(positions.values())):
+            plans = dbm.get_active_position_plans(self.conn, aid)
+        if not plans:
             return actions
         for plan in plans:
             sym = str(plan["symbol"]).upper()
@@ -511,6 +516,53 @@ class DayTraderAgent(AgentBase):
             except Exception:
                 log.exception("stop monitor: failed to close %s", sym)
         return actions
+
+    def _ensure_default_stops(self, aid: int, positions: list) -> bool:
+        """Backfill a catch-all protective stop for held positions with no plan.
+
+        Opt-in via DAY_DEFAULT_STOP_PCT (0 = off). Skips option (OCC) symbols and
+        dust. Returns True if any plan was created.
+        """
+        from src.config import get_settings
+        s = get_settings()
+        pct = float(getattr(s, "day_default_stop_pct", 0.0) or 0.0)
+        if pct <= 0:
+            return False
+        try:
+            acct = self.broker.get_account(self.sub_account)
+            dust = acct.equity * DUST_POSITION_PCT if acct.equity else 0.0
+        except Exception:
+            dust = 0.0
+        existing = {str(r["symbol"]).upper()
+                    for r in dbm.get_active_position_plans(self.conn, aid)}
+        created = False
+        for p in positions:
+            sym = p.symbol.upper()
+            if sym in existing or len(sym) > 6:      # skip planned + OCC option symbols
+                continue
+            qty = p.qty
+            if abs(qty) <= 1e-9:
+                continue
+            entry = p.avg_cost or p.mark_price
+            if not entry or entry <= 0:
+                continue
+            if abs(qty) * (p.mark_price or entry) < dust:  # ignore dust
+                continue
+            is_long = qty > 0
+            stop = entry * (1 - pct) if is_long else entry * (1 + pct)
+            target = entry * (1 + 2 * pct) if is_long else entry * (1 - 2 * pct)
+            side = "buy" if is_long else "sell"
+            try:
+                dbm.upsert_position_plan(
+                    self.conn, account_id=aid, symbol=sym, side=side,
+                    entry_price=float(entry), stop_price=round(float(stop), 4),
+                    target_price=round(float(target), 4), agent=self.name)
+                log.info("default stop set for unplanned %s (%s): entry=%.4f stop=%.4f",
+                          sym, side, entry, stop)
+                created = True
+            except Exception:
+                log.exception("failed to set default stop for %s", sym)
+        return created
 
     def manage_positions_only(self) -> list[dict]:
         """Run ONLY the stop monitor (no LLM). Used by the fast scheduler job so
