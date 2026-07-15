@@ -620,17 +620,57 @@ class DayTraderAgent(AgentBase):
             equity = acct.equity if acct else 0.0
             cap_pct = float(getattr(s, "day_max_position_pct", MAX_POSITION_PCT) or 0.20)
             theme_cap_pct = float(getattr(s, "day_theme_max_pct", 0.35) or 0.0)
+            # Active stop plans, keyed by symbol, so we can show each holding's
+            # distance to its stop (the weakest/closest-to-stop names are the
+            # natural exit candidates when the book is full).
+            plans_by_sym: dict[str, dict] = {}
+            try:
+                aid = self._account_id()
+                for pl in dbm.get_active_position_plans(self.conn, aid):
+                    plans_by_sym[str(pl["symbol"]).upper()] = dict(pl)
+            except Exception:
+                log.debug("could not load plans for idea context", exc_info=True)
             held = {}
             theme_exposure: dict[str, float] = {}
+            holdings: list[dict] = []
             for p in positions:
-                if p.qty > 0 and equity > 0:
-                    pct = 100.0 * abs(p.qty) * (p.mark_price or 0.0) / equity
-                    held[p.symbol.upper()] = pct
-                    th = _theme_of(p.symbol)
-                    theme_exposure[th] = theme_exposure.get(th, 0.0) + pct
+                qty = p.qty
+                if abs(qty) <= 1e-9 or equity <= 0:
+                    continue
+                sym = p.symbol.upper()
+                mark = p.mark_price or 0.0
+                pct = 100.0 * abs(qty) * mark / equity
+                held[sym] = pct                       # counts longs AND shorts
+                th = _theme_of(sym)
+                theme_exposure[th] = theme_exposure.get(th, 0.0) + pct
+                # Per-holding detail so the agent can judge what to exit/rotate.
+                is_long = qty > 0
+                stop = plans_by_sym.get(sym, {}).get("stop_price")
+                dist_to_stop_pct = None
+                if stop and mark > 0:
+                    # +ve = comfortable room; near 0 = about to stop out.
+                    dist_to_stop_pct = round(
+                        (100.0 * (mark - stop) / mark) if is_long
+                        else (100.0 * (stop - mark) / mark), 2)
+                holdings.append({
+                    "symbol": sym,
+                    "side": "long" if is_long else "short",
+                    "pct_of_equity": round(pct, 1),
+                    "unrealized_pnl": round(getattr(p, "unrealized_pnl", 0.0) or 0.0, 2),
+                    "avg_cost": round(p.avg_cost or 0.0, 4),
+                    "mark": round(mark, 4),
+                    "stop": round(stop, 4) if stop else None,
+                    "pct_to_stop": dist_to_stop_pct,
+                    "theme": th,
+                })
+            # Weakest holdings first: biggest losers, then closest to their stop —
+            # the natural candidates to exit when freeing a slot.
+            holdings.sort(key=lambda h: (h["unrealized_pnl"],
+                                          h["pct_to_stop"] if h["pct_to_stop"] is not None else 1e9))
             # Names traded very recently are on cooldown — hide them so the agent
             # rotates into DIFFERENT names instead of hammering one ticker.
             cooldown = self._recent_traded_symbols()
+            book_full = len(held) >= MAX_CONCURRENT_POSITIONS
             ctx = {
                 "equity": round(equity, 2) if equity else None,
                 "cash": round(acct.cash, 2) if acct else None,
@@ -639,10 +679,20 @@ class DayTraderAgent(AgentBase):
                 "per_theme_cap_pct": round(theme_cap_pct * 100, 1),
                 "held": {k: round(v, 1) for k, v in held.items()},
                 "theme_exposure_pct": {k: round(v, 1) for k, v in theme_exposure.items()},
+                "holdings": holdings,
                 "on_cooldown": sorted(cooldown),
                 "open_position_count": len(held),
                 "max_positions": MAX_CONCURRENT_POSITIONS,
+                "book_full": book_full,
             }
+            if book_full:
+                ctx["book_full_note"] = (
+                    "BOOK IS FULL (max positions held). A new entry can only be placed "
+                    "AFTER you free a slot. If a listed idea is clearly BETTER than your "
+                    "weakest current holding (see `holdings`, sorted weakest-first: biggest "
+                    "loser / closest to stop), call `exit_position` on that weakest name, "
+                    "THEN propose the new one. If nothing beats what you hold, do not "
+                    "propose a new entry this tick.")
             if used_tier != tier:
                 ctx["tier_requested"] = tier
                 ctx["tier_broadened_to"] = used_tier
@@ -848,12 +898,20 @@ class DayTraderAgent(AgentBase):
             f"It is {self._wall().isoformat()} (US market hours). Manage the day-trading "
             "sub-account for maximum return today.\n"
             "Workflow this tick:\n"
-            "1. Call `list_intraday_ideas` to see today's candidates.\n"
-            "2. For the most promising 1-3, confirm with `get_quote` (price/vol) and "
-            "`get_news` (catalysts + sentiment).\n"
-            "3. Check `current_positions` / `account_snapshot` for context and room.\n"
-            "4. Propose only setups with a clear trigger, a defined stop, and >=2:1 "
-            "reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing."
+            "1. Call `list_intraday_ideas` — its `portfolio` block shows your `holdings`\n"
+            "   (sorted WEAKEST-first: biggest loser / closest to stop), idle cash, and a\n"
+            "   `book_full` flag.\n"
+            "2. MANAGE what you already hold: if a holding's thesis is done/invalidated,\n"
+            "   it's a clear loser, or it's the weakest name and a listed idea is clearly\n"
+            "   better, `exit_position` it. This is expected every tick, not optional.\n"
+            "3. For the most promising 1-3 NEW ideas, run BOTH `get_news` AND\n"
+            "   `get_analyst_view` (required — a proposal without both is auto-rejected),\n"
+            "   plus `get_quote` for structure/stop.\n"
+            "4. If `book_full` is true, you must FREE A SLOT with `exit_position` first;\n"
+            "   only then propose the replacement. Do not waste the tick proposing a name\n"
+            "   you can't place.\n"
+            "5. Propose only setups with a clear trigger, a defined stop, and >=2:1\n"
+            "   reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing."
             + opt_hint)
         # Budget the LLM tool loop to ~80% of the tick cadence so a slow model
         # (gpt-5 reasoning + retries) can't overrun the interval and cause the

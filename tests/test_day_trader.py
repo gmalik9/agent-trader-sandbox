@@ -83,6 +83,11 @@ def _exit(symbol="AAPL", reason="rotate"):
         arguments={"symbol": symbol, "reason": reason})])
 
 
+def _ideas_call():
+    return ChatResult(text=None, tool_calls=[ToolCall(
+        id="i1", name="list_intraday_ideas", arguments={"tier": "A", "limit": 5})])
+
+
 def test_agent_can_proactively_exit_position(tmp_db, stub_bars, monkeypatch):
     """The agent can close a held position via the exit_position tool."""
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
@@ -562,6 +567,56 @@ def test_max_concurrent_positions_rejects_extra(tmp_db, stub_bars, monkeypatch):
     # Decision recorded with reject_reason.
     rejected = [d for d in out.decisions if d.get("symbol") == "FFF" and not d.get("accepted")]
     assert rejected and rejected[0]["reject_reason"] == "max_concurrent_positions"
+
+
+def test_idea_context_surfaces_holdings_and_book_full(tmp_db, stub_bars, monkeypatch):
+    """list_intraday_ideas' portfolio block exposes per-holding detail and a
+    book_full flag so the agent can rotate."""
+    import json
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_DEFAULT_STOP_PCT", "0")
+    from src import config
+    config.get_settings.cache_clear()
+
+    # Seed 8 material positions so the book is full.
+    syms = ("AAA", "BBB", "CCC", "DDD", "EEE", "GGG", "HHH", "III")
+    for s in syms:
+        stub_bars.set(s, o=10, h=10.5, l=9.5, c=10)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars, mirror=True)
+    from src.brokers.base import OrderRequest
+    for s in syms:
+        broker.place_order(OrderRequest(symbol=s, side="buy", qty=100,
+                                         sub_account="day", agent="manual"))
+    # Give AAA an explicit stop plan so pct_to_stop is populated.
+    aid = dbm.get_account_id(tmp_db, "day")
+    dbm.upsert_position_plan(tmp_db, account_id=aid, symbol="AAA", side="buy",
+                             entry_price=10.0, stop_price=9.5, target_price=11.0,
+                             agent="day")
+    prov = ScriptedProvider([_ideas_call(), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
+    # Keep the stop monitor from closing AAA (FakeShortTerm would report 150).
+    monkeypatch.setattr(agent, "_latest_price", lambda s: 10.0)
+    out = agent.run_once()
+    assert out.status == "ok"
+    # Read the list_intraday_ideas tool result from the recorded run.
+    row = tmp_db.execute(
+        "SELECT tools_called FROM agent_runs WHERE agent='day' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    steps = json.loads(row["tools_called"] or "[]")
+    result = None
+    for st in steps:
+        for tc in st.get("tool_calls", []):
+            if tc.get("name") == "list_intraday_ideas":
+                result = tc.get("result")
+    assert result is not None
+    pf = result["portfolio"]
+    assert pf["book_full"] is True
+    assert pf["open_position_count"] == 8
+    holdings = {h["symbol"]: h for h in pf["holdings"]}
+    assert "AAA" in holdings and holdings["AAA"]["pct_to_stop"] is not None
+    assert holdings["AAA"]["side"] == "long"
+    config.get_settings.cache_clear()
 
 
 def test_daily_drawdown_halts(tmp_db, stub_bars):
