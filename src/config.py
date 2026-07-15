@@ -62,13 +62,19 @@ class Settings(BaseSettings):
     day_tick_seconds: int = 60
     # Intraday scanner refresh. list_ideas only returns the LAST scan_run result,
     # so without a periodic refresh the idea universe (and its prices) goes stale.
-    # scan_run rescans the liquid universe (~2-3 min) and shares the sibling MCP
-    # subprocess with the day agent, so a scan briefly slows one day tick; a
-    # 10-min cadence keeps ideas fresh while keeping that disruption infrequent.
-    # Price staleness for sizing is separately handled by _reprice_to_market.
-    # Set to 0 to disable the refresh job.
-    scan_refresh_seconds: int = 600
-    scan_refresh_timeout_seconds: float = 300.0  # client wait cap for one scan
+    # scan_run rescans the universe and shares the sibling MCP subprocess with
+    # the day agent, so a scan briefly slows day ticks; the broader sp500 scan
+    # takes longer, so a 15-min cadence keeps that contention infrequent while
+    # still keeping ideas fresh. Price staleness for sizing is separately handled
+    # by _reprice_to_market. Set to 0 to disable the refresh job.
+    scan_refresh_seconds: int = 900
+    scan_refresh_timeout_seconds: float = 420.0  # client wait cap (sp500 ~500 names)
+    # Which scanner universe to scan. "liquid" (~300 hardcoded large-caps, semis/
+    # tech-tilted) can leave the agent picking from a narrow, correlated set on a
+    # given day. "sp500" (~500 dynamically-maintained S&P 500 names across every
+    # sector) gives a much broader, more diversified candidate pool so the agent
+    # isn't stuck on a handful of names. Options: liquid | sp500 | all.
+    scan_universe: str = "sp500"
     # Intraday stop monitor. The day agent sets a stop at entry but nothing
     # submits it as a live order, so a dedicated cheap job (no LLM) checks each
     # open position's live price against its stop/target on this cadence and

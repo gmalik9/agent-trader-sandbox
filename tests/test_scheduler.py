@@ -86,6 +86,8 @@ def test_scan_refresh_triggers_scan_run(runner, monkeypatch):
     runner.job_scan_refresh()
     st.scan_run.assert_called_once()
     assert st.scan_run.call_args.kwargs.get("mode") == "intraday"
+    # Uses the configured universe (default sp500 for a broad candidate pool).
+    assert st.scan_run.call_args.kwargs.get("universe") == runner.settings.scan_universe
 
 
 def test_scan_refresh_swallows_timeout(runner, monkeypatch):

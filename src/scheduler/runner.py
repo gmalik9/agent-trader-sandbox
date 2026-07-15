@@ -266,10 +266,12 @@ class SchedulerRunner:
         if st is None or not hasattr(st, "scan_run"):
             return
         timeout = float(getattr(self.settings, "scan_refresh_timeout_seconds", 300.0) or 300.0)
+        universe = str(getattr(self.settings, "scan_universe", "liquid") or "liquid")
         t0 = time.monotonic()
         try:
-            st.scan_run(mode="intraday", universe="liquid", timeout=timeout)
-            log.info("scan_refresh: ideas refreshed in %.0fs", time.monotonic() - t0)
+            st.scan_run(mode="intraday", universe=universe, timeout=timeout)
+            log.info("scan_refresh: %s ideas refreshed in %.0fs",
+                      universe, time.monotonic() - t0)
         except TimeoutError:
             log.info("scan_refresh: client wait cap hit after %.0fs (server keeps "
                       "scanning; cache updates when done)", time.monotonic() - t0)
