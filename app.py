@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -97,6 +98,10 @@ def _aid(name: str) -> int | None:
 
 # ---------------- readable time helpers ----------------
 
+# All UI timestamps are shown in US Central time (handles CDT/CST automatically).
+_CENTRAL = ZoneInfo("America/Chicago")
+
+
 def _parse_ts(iso: str | None) -> datetime | None:
     if not iso:
         return None
@@ -108,11 +113,11 @@ def _parse_ts(iso: str | None) -> datetime | None:
 
 
 def _fmt_ts(iso: str | None) -> str:
-    """Human-readable UTC timestamp, e.g. 'Mon, Jul 13 2026 · 4:57 PM UTC'."""
+    """Human-readable Central-time timestamp, e.g. 'Mon, Jul 13 2026 · 11:57 AM CDT'."""
     dt = _parse_ts(iso)
     if dt is None:
         return "—"
-    return dt.strftime("%a, %b %-d %Y · %-I:%M %p UTC")
+    return dt.astimezone(_CENTRAL).strftime("%a, %b %-d %Y · %-I:%M %p %Z")
 
 
 def _humanize_age(iso: str | None) -> str:
@@ -143,12 +148,15 @@ def _readable_ts_column(frame: pd.DataFrame, col: str = "ts", new: str = "When")
 
 
 def _to_dt(series: pd.Series) -> pd.Series:
-    """Robustly parse ISO-8601 timestamps that may mix microsecond precision.
+    """Robustly parse ISO-8601 timestamps that may mix microsecond precision,
+    converted to US Central wall-clock time for chart axes.
 
     Demo-seeded rows have no microseconds while live fills do; a fixed inferred
-    format then fails, so we parse each element per ISO-8601.
+    format then fails, so we parse each element per ISO-8601. We then convert to
+    Central and drop the tz so Plotly plots Central local time on the axis.
     """
-    return pd.to_datetime(series, format="ISO8601", utc=True)
+    parsed = pd.to_datetime(series, format="ISO8601", utc=True)
+    return parsed.dt.tz_convert(_CENTRAL).dt.tz_localize(None)
 
 
 @st.cache_data(ttl=30)
