@@ -76,7 +76,7 @@ def test_tool_exception_is_captured_not_raised():
     assert "RuntimeError" in out.steps[0].tool_calls[0]["result"]["error"]
 
 
-def test_max_steps_cap_returns_none_text():
+def test_max_steps_cap_returns_summary_text():
     # Model keeps calling forever.
     spec = ToolSpec(name="ping", description="", json_schema={"type": "object"})
     prov = ScriptedProvider([
@@ -86,5 +86,6 @@ def test_max_steps_cap_returns_none_text():
     out = run_tool_loop(prov, [{"role": "user", "content": "x"}],
                         handlers=[ToolHandler(spec=spec, fn=lambda: {"pong": True})],
                         max_steps=3)
-    assert out.final_text is None
+    # Hitting max_steps now returns a synthesized summary (never a blank reasoning).
+    assert out.final_text is not None and "auto-summary" in out.final_text
     assert len(out.steps) == 3

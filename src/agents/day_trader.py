@@ -967,13 +967,15 @@ class DayTraderAgent(AgentBase):
                 "`portfolio`/holdings). Manage holdings (`exit_position` losers/weakest; if "
                 "`book_full`, exit before any new entry). For a NEW idea, call `get_news` AND "
                 "`get_analyst_view` (both REQUIRED) then `propose_trade` with a defined stop "
-                "and >=2:1 R:R. Otherwise do nothing." + opt_hint)
+                "and >=2:1 R:R. Otherwise do nothing.\n"
+                "BE EFFICIENT: you have a limited number of tool steps. Call `list_intraday_ideas` "
+                "ONCE, don't re-fetch the same data, and finish with a brief summary." + opt_hint)
         else:
             user = (
                 f"It is {self._wall().isoformat()} (US market hours). Manage the day-trading "
                 "sub-account for maximum return today.\n"
                 "Workflow this tick:\n"
-                "1. Call `list_intraday_ideas` — its `portfolio` block shows your `holdings`\n"
+                "1. Call `list_intraday_ideas` ONCE — its `portfolio` block shows your `holdings`\n"
                 "   (sorted WEAKEST-first: biggest loser / closest to stop), idle cash, and a\n"
                 "   `book_full` flag.\n"
                 "2. MANAGE what you already hold: if a holding's thesis is done/invalidated,\n"
@@ -986,7 +988,10 @@ class DayTraderAgent(AgentBase):
                 "   only then propose the replacement. Do not waste the tick proposing a name\n"
                 "   you can't place.\n"
                 "5. Propose only setups with a clear trigger, a defined stop, and >=2:1\n"
-                "   reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing."
+                "   reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing.\n"
+                "BE EFFICIENT: you have a limited number of tool steps per tick. Don't re-call\n"
+                "`list_intraday_ideas` or re-fetch data you already have; move to a decision and\n"
+                "END WITH A ONE-LINE SUMMARY of what you did (or 'no trades today')."
                 + opt_hint)
         # Budget the LLM tool loop to ~80% of the tick cadence so a slow model
         # (gpt-5 reasoning + retries) can't overrun the interval and cause the
