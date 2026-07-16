@@ -303,13 +303,23 @@ class SchedulerRunner:
         try:
             rows = self.conn.execute(
                 "SELECT id, agent FROM tick_requests WHERE consumed_at IS NULL "
-                "ORDER BY id LIMIT 20"
+                "ORDER BY id LIMIT 50"
             ).fetchall()
         except Exception:
             log.exception("tick_poll select failed")
             return
+        if not rows:
+            return
+        # Coalesce: multiple pending requests for the SAME agent (e.g. the user
+        # clicking "Tick now" several times) only need ONE run. Run each distinct
+        # agent at most once and mark ALL of that agent's pending requests
+        # consumed — so repeated clicks are cheap and resolve in one cycle instead
+        # of queuing N sequential LLM ticks.
+        by_agent: dict[str, list[int]] = {}
         for row in rows:
-            tid, agent = row["id"], row["agent"]
+            by_agent.setdefault(row["agent"], []).append(row["id"])
+        now_iso = now_utc().isoformat()
+        for agent, ids in by_agent.items():
             try:
                 if agent == "day":
                     self._day_agent().run_once()
@@ -322,11 +332,12 @@ class SchedulerRunner:
                 else:
                     log.warning("tick_poll: unknown agent=%r", agent)
             except Exception:
-                log.exception("tick %s (agent=%s) failed", tid, agent)
+                log.exception("tick (agent=%s) failed", agent)
             finally:
+                placeholders = ",".join("?" * len(ids))
                 self.conn.execute(
-                    "UPDATE tick_requests SET consumed_at=? WHERE id=?",
-                    (now_utc().isoformat(), tid),
+                    f"UPDATE tick_requests SET consumed_at=? WHERE id IN ({placeholders})",
+                    (now_iso, *ids),
                 )
 
     # ---------------- wiring ----------------

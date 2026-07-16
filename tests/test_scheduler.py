@@ -64,6 +64,24 @@ def test_tick_poll_consumes_request_and_dispatches(runner, monkeypatch):
     assert all(r["consumed_at"] is not None for r in rows)
 
 
+def test_tick_poll_coalesces_duplicate_agent_requests(runner, monkeypatch):
+    """Multiple pending requests for the same agent run it ONCE and consume all."""
+    fake_day = MagicMock()
+    monkeypatch.setattr(runner, "_day_agent", lambda: fake_day)
+    # Five rapid "Tick day now" clicks.
+    for _ in range(5):
+        runner.conn.execute(
+            "INSERT INTO tick_requests(ts, agent, requested_by) VALUES (?, 'day', 'test')",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+    runner.job_tick_poll()
+    # The agent ran exactly once despite 5 queued requests…
+    fake_day.run_once.assert_called_once()
+    # …and every one of the 5 requests is marked consumed.
+    rows = runner.conn.execute("SELECT consumed_at FROM tick_requests").fetchall()
+    assert len(rows) == 5 and all(r["consumed_at"] is not None for r in rows)
+
+
 def test_tick_poll_records_consumption_even_when_agent_raises(runner, monkeypatch):
     bomb = MagicMock()
     bomb.run_once.side_effect = RuntimeError("boom")

@@ -187,7 +187,9 @@ def _enqueue_tick(agent: str) -> None:
         "INSERT INTO tick_requests(ts, agent, requested_by) VALUES (?, ?, 'ui')",
         (datetime.now(timezone.utc).isoformat(), agent),
     )
-    st.success(f"queued {agent} tick — scheduler will pick it up within ~5s")
+    st.success(f"Queued a {agent} tick — the scheduler runs it on its next poll "
+               "(usually within a few seconds, longer if a tick is already running). "
+               "Repeated clicks are coalesced into one run.")
 
 
 def _scheduler_status() -> tuple[str, str]:
