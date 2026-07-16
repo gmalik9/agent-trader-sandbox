@@ -328,6 +328,30 @@ When no qualified edge exists this minute, output exactly:
 """
 
 
+# Compact system prompt for COMPACT MODE — a much smaller request so the whole
+# tool-loop payload fits under the fallback model's ~8k-token input cap (GitHub
+# Models' gpt-4o-mini). It preserves every ENFORCED behaviour (mandatory
+# news+analyst diligence, live stops, book rotation, 2:1 R:R, defined stops,
+# inverse-ETF rule) but drops the long-form guidance. Toggle at runtime via the
+# `compact_prompt` setting or DAY_COMPACT_MODE.
+SYSTEM_PROMPT_COMPACT = """You are "Atlas-Day", an intraday trader on a PAPER account. Goal: maximize risk-adjusted return TODAY; preserve capital. Called ~every 2 min in market hours. NO trade is fine when edge is unclear.
+
+FLOW each tick:
+1) `list_intraday_ideas` — ranked candidates + your `portfolio` (holdings sorted WEAKEST-first, cash, `book_full`).
+2) MANAGE holdings: `exit_position` any name whose thesis is done/invalidated, a clear loser, or the weakest when a better idea exists. If `book_full` you MUST exit to free a slot before any new entry.
+3) For each NEW candidate, call BOTH `get_news` AND `get_analyst_view` (REQUIRED — a `propose_trade` missing either is auto-rejected) plus `get_quote` for structure/stop.
+4) `propose_trade` only setups with a clear trigger, a defined stop, and >=2:1 reward:risk. side='buy'=long (stop BELOW entry); side='sell'=short (stop ABOVE entry).
+
+RULES:
+- Stops are LIVE: a monitor closes each position at its stop or 2R target within ~30s, so a defined stop is real protection — act decisively on genuine edges (a well-structured SHORT counts).
+- Bearish on a leveraged/inverse ETF: BUY its inverse (bearish semis -> buy SOXS); shorting them is auto-converted.
+- Diversify across UNCORRELATED themes. Per-name ~20%, per-theme ~35%, and 8-position caps are auto-enforced; don't fixate on one name/theme.
+- No new entries after 15:30 ET; all positions auto-closed 15:55 ET.
+- Options: `list_option_contracts` then `propose_option` (1-2 contracts) for high-conviction directional plays.
+
+If no qualified edge this tick, do nothing."""
+
+
 @dataclass
 class _Proposal:
     symbol: str
@@ -596,6 +620,17 @@ class DayTraderAgent(AgentBase):
             return []
         return self._manage_open_positions()
 
+    def _compact_mode(self) -> bool:
+        """Whether to send the smaller COMPACT request this tick.
+
+        The live `compact_prompt` setting (a UI toggle) wins if present ('on' /
+        'off'); otherwise fall back to the DAY_COMPACT_MODE config default.
+        """
+        val = dbm.get_setting(self.conn, "compact_prompt")
+        if val is not None:
+            return str(val).strip().lower() in ("1", "true", "yes", "on")
+        from src.config import get_settings
+        return bool(getattr(get_settings(), "day_compact_mode", False))
 
     def _run_llm_loop(self):
         proposals: list[_Proposal] = []
@@ -606,6 +641,11 @@ class DayTraderAgent(AgentBase):
         # failure mode: trades placed without a get_analyst_view / get_news check).
         self._news_checked: set[str] = set()
         self._analyst_checked: set[str] = set()
+        # COMPACT MODE: shrink the request so it fits under the fallback model's
+        # ~8k input cap (when gpt-5 is rate-limited and we downshift to gpt-4o-mini
+        # on GitHub Models). Runtime `compact_prompt` setting overrides the config
+        # default so it can be flipped from the UI without a restart.
+        compact = self._compact_mode()
 
         def list_intraday_ideas(*, tier: str = "A", limit: int = 10) -> dict:
             # Auto-broaden: the scanner often has zero tier-A (and B) setups on a
@@ -613,6 +653,8 @@ class DayTraderAgent(AgentBase):
             # idle. Widen A→B→C until we get a non-empty candidate universe so the
             # agent always has fresh names to evaluate; note when we broadened.
             tier = (tier or "A").upper()
+            if compact:
+                limit = min(int(limit or 10), 6)   # fewer names → smaller payload
             widen = {"A": ["A", "B", "C"], "B": ["B", "C"], "C": ["C"]}.get(tier, ["A", "B", "C"])
             res, used_tier = None, tier
             for t in widen:
@@ -713,10 +755,13 @@ class DayTraderAgent(AgentBase):
             if used_tier != tier:
                 ctx["tier_requested"] = tier
                 ctx["tier_broadened_to"] = used_tier
-            return _summarize_ideas(res, held_pct=held, cap_pct=cap_pct * 100,
-                                     theme_exposure=theme_exposure,
-                                     theme_cap_pct=theme_cap_pct * 100,
-                                     cooldown=cooldown, context=ctx)
+            result = _summarize_ideas(res, held_pct=held, cap_pct=cap_pct * 100,
+                                       theme_exposure=theme_exposure,
+                                       theme_cap_pct=theme_cap_pct * 100,
+                                       cooldown=cooldown, context=ctx)
+            if compact:
+                result = _compact_ideas_result(result)
+            return result
 
         def get_quote(symbol: str) -> dict:
             try:
@@ -915,32 +960,45 @@ class DayTraderAgent(AgentBase):
         opt_hint = ("" if self.options is None else
                     " Options (calls/puts) are also available via `list_option_contracts` "
                     "then `propose_option` for defined-risk or higher-conviction plays.")
-        user = (
-            f"It is {self._wall().isoformat()} (US market hours). Manage the day-trading "
-            "sub-account for maximum return today.\n"
-            "Workflow this tick:\n"
-            "1. Call `list_intraday_ideas` — its `portfolio` block shows your `holdings`\n"
-            "   (sorted WEAKEST-first: biggest loser / closest to stop), idle cash, and a\n"
-            "   `book_full` flag.\n"
-            "2. MANAGE what you already hold: if a holding's thesis is done/invalidated,\n"
-            "   it's a clear loser, or it's the weakest name and a listed idea is clearly\n"
-            "   better, `exit_position` it. This is expected every tick, not optional.\n"
-            "3. For the most promising 1-3 NEW ideas, run BOTH `get_news` AND\n"
-            "   `get_analyst_view` (required — a proposal without both is auto-rejected),\n"
-            "   plus `get_quote` for structure/stop.\n"
-            "4. If `book_full` is true, you must FREE A SLOT with `exit_position` first;\n"
-            "   only then propose the replacement. Do not waste the tick proposing a name\n"
-            "   you can't place.\n"
-            "5. Propose only setups with a clear trigger, a defined stop, and >=2:1\n"
-            "   reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing."
-            + opt_hint)
+        if compact:
+            user = (
+                f"It is {self._wall().isoformat()} (US market hours). Manage the day book "
+                "for max return today. Call `list_intraday_ideas` first (it returns your "
+                "`portfolio`/holdings). Manage holdings (`exit_position` losers/weakest; if "
+                "`book_full`, exit before any new entry). For a NEW idea, call `get_news` AND "
+                "`get_analyst_view` (both REQUIRED) then `propose_trade` with a defined stop "
+                "and >=2:1 R:R. Otherwise do nothing." + opt_hint)
+        else:
+            user = (
+                f"It is {self._wall().isoformat()} (US market hours). Manage the day-trading "
+                "sub-account for maximum return today.\n"
+                "Workflow this tick:\n"
+                "1. Call `list_intraday_ideas` — its `portfolio` block shows your `holdings`\n"
+                "   (sorted WEAKEST-first: biggest loser / closest to stop), idle cash, and a\n"
+                "   `book_full` flag.\n"
+                "2. MANAGE what you already hold: if a holding's thesis is done/invalidated,\n"
+                "   it's a clear loser, or it's the weakest name and a listed idea is clearly\n"
+                "   better, `exit_position` it. This is expected every tick, not optional.\n"
+                "3. For the most promising 1-3 NEW ideas, run BOTH `get_news` AND\n"
+                "   `get_analyst_view` (required — a proposal without both is auto-rejected),\n"
+                "   plus `get_quote` for structure/stop.\n"
+                "4. If `book_full` is true, you must FREE A SLOT with `exit_position` first;\n"
+                "   only then propose the replacement. Do not waste the tick proposing a name\n"
+                "   you can't place.\n"
+                "5. Propose only setups with a clear trigger, a defined stop, and >=2:1\n"
+                "   reward:risk — long, short, leveraged ETF, or option. Otherwise do nothing."
+                + opt_hint)
         # Budget the LLM tool loop to ~80% of the tick cadence so a slow model
         # (gpt-5 reasoning + retries) can't overrun the interval and cause the
         # scheduler to skip subsequent ticks.
         from src.config import get_settings
         cadence = float(getattr(get_settings(), "day_tick_seconds", 60) or 60)
         deadline = max(20.0, cadence * 0.8)
-        loop_res = self._run_llm(SYSTEM_PROMPT, user, handlers, max_steps=8,
+        system_prompt = SYSTEM_PROMPT_COMPACT if compact else SYSTEM_PROMPT
+        # Fewer steps in compact mode → less accumulated tool-result history, so the
+        # running conversation stays under the fallback model's input cap.
+        max_steps = 6 if compact else 8
+        loop_res = self._run_llm(system_prompt, user, handlers, max_steps=max_steps,
                                   deadline_seconds=deadline)
         return proposals, option_proposals, exits, loop_res
 
@@ -1366,6 +1424,43 @@ def _summarize_quote(symbol: str, raw: dict) -> dict:
         "pct_vs_sma20": _rel(price, sma20),
         "source": raw.get("source", "mcp"),
     }
+
+
+def _compact_ideas_result(result: dict) -> dict:
+    """Slim a list_intraday_ideas result for COMPACT MODE so the tool payload
+    stays small enough for the fallback model's ~8k input cap. Keeps only the
+    decision-relevant fields per idea and a trimmed portfolio block."""
+    if not isinstance(result, dict) or result.get("error"):
+        return result
+    ideas = []
+    for i in (result.get("ideas") or [])[:6]:
+        ideas.append({
+            "ticker": i.get("ticker"),
+            "direction": i.get("direction"),
+            "tier": i.get("tier"),
+            "heat_score": i.get("heat_score"),
+            "has_news_catalyst": i.get("has_news_catalyst"),
+            "entry": i.get("entry"), "stop": i.get("stop"),
+            "target": i.get("target"), "rr": i.get("rr"),
+        })
+    pf = result.get("portfolio") or {}
+    holdings = [{
+        "symbol": h.get("symbol"), "side": h.get("side"),
+        "unrealized_pnl": h.get("unrealized_pnl"), "pct_to_stop": h.get("pct_to_stop"),
+    } for h in (pf.get("holdings") or [])]
+    compact_pf = {
+        "equity": pf.get("equity"), "cash": pf.get("cash"),
+        "pct_cash_idle": pf.get("pct_cash_idle"),
+        "open_position_count": pf.get("open_position_count"),
+        "max_positions": pf.get("max_positions"),
+        "book_full": pf.get("book_full"),
+        "holdings": holdings,
+    }
+    out = {"count": len(ideas), "ideas": ideas, "portfolio": compact_pf}
+    if result.get("book_full_note") or (pf.get("book_full")):
+        out["note"] = ("Book full — exit_position your weakest holding before any new "
+                        "entry." if pf.get("book_full") else "")
+    return out
 
 
 def _summarize_ideas(res: dict, *, held_pct: dict | None = None,

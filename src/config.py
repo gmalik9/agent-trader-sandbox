@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     # the low-diligence proposals are exactly the low-quality trades. Set False to
     # revert to advisory-only.
     day_require_diligence: bool = True
+    # Compact mode: send a much smaller request (short system prompt, trimmed idea
+    # list, fewer tool-loop steps) so the payload fits under the fallback model's
+    # ~8k-token input cap when the primary (gpt-5) is rate-limited. This is the
+    # DEFAULT; the live `compact_prompt` setting (a UI toggle) overrides it.
+    day_compact_mode: bool = False
     # Catch-all protective stop for any HELD position that has no explicit plan
     # (e.g. opened manually, or before the plan feature existed). The stop monitor
     # backfills a stop this % from avg cost (and a 2R target) so every position is

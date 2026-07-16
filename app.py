@@ -985,6 +985,20 @@ with tabs[5]:
         dbm.set_setting(get_writable_conn(), "kill_switch", "on" if new_kill else "off")
         st.success(f"kill switch -> {'on' if new_kill else 'off'}")
 
+    cur_compact = dbm.get_setting(get_writable_conn(), "compact_prompt") == "on"
+    new_compact = st.toggle("Compact mode (fits free-tier fallback model)", value=cur_compact,
+                             help="Send a much smaller request to the LLM: a short system "
+                                  "prompt, a trimmed idea list, and fewer tool-loop steps. "
+                                  "Turn this ON when the primary model (gpt-5) is rate-limited "
+                                  "and the agent downshifts to the fallback (gpt-4o-mini, "
+                                  "~8k-token input cap) — it keeps the agent trading instead "
+                                  "of failing every tick with HTTP 413 'request too large'. "
+                                  "Trade-off: slightly less context per decision. All safety "
+                                  "rules (stops, required diligence, caps) stay enforced.")
+    if new_compact != cur_compact:
+        dbm.set_setting(get_writable_conn(), "compact_prompt", "on" if new_compact else "off")
+        st.success(f"compact mode -> {'on' if new_compact else 'off'}")
+
     st.divider()
     st.subheader("Manual ticks")
     c1, c2, c3, c4 = st.columns(4)

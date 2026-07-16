@@ -128,6 +128,44 @@ def test_exit_position_refuses_option_symbol(tmp_db, stub_bars):
     assert not any("agent_exit" in d for d in out.decisions)
 
 
+def test_compact_mode_toggle_via_setting(tmp_db, stub_bars):
+    """The compact_prompt setting flips _compact_mode; default (unset) is False."""
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(),
+                            provider=ScriptedProvider([]), now=MARKET_OPEN)
+    assert agent._compact_mode() is False           # unset → config default (False)
+    dbm.set_setting(tmp_db, "compact_prompt", "on")
+    assert agent._compact_mode() is True            # toggle ON
+    dbm.set_setting(tmp_db, "compact_prompt", "off")
+    assert agent._compact_mode() is False           # toggle OFF
+
+
+def test_compact_ideas_result_trims_payload():
+    from src.agents.day_trader import _compact_ideas_result
+    full = {
+        "count": 1,
+        "ideas": [
+            {"ticker": "AAA", "direction": "long", "tier": "A", "heat_score": 90.0,
+             "has_news_catalyst": True, "entry": 10.0, "stop": 9.5, "target": 11.0,
+             "rr": 2.0, "signal_tags": "x,y,z", "dollar_risk": 250, "already_held_pct": 0.0,
+             "room_left": 20.0, "at_cap": False, "theme": "t", "effective_symbol": "AAA"},
+        ],
+        "portfolio": {"equity": 100000, "cash": 5000, "pct_cash_idle": 5.0,
+                       "open_position_count": 8, "max_positions": 8, "book_full": True,
+                       "held": {"AAA": 20.0}, "theme_exposure_pct": {"t": 20.0},
+                       "holdings": [{"symbol": "AAA", "side": "long", "pct_of_equity": 20.0,
+                                      "unrealized_pnl": -100.0, "avg_cost": 10.0, "mark": 9.8,
+                                      "stop": 9.5, "pct_to_stop": 3.0, "theme": "t"}]},
+    }
+    slim = _compact_ideas_result(full)
+    i = slim["ideas"][0]
+    assert set(i) == {"ticker", "direction", "tier", "heat_score", "has_news_catalyst",
+                       "entry", "stop", "target", "rr"}
+    assert slim["portfolio"]["book_full"] is True
+    h = slim["portfolio"]["holdings"][0]
+    assert set(h) == {"symbol", "side", "unrealized_pnl", "pct_to_stop"}
+
+
 def test_kill_switch_halts_immediately(tmp_db, stub_bars):
     dbm.set_setting(tmp_db, "kill_switch", "on")
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
