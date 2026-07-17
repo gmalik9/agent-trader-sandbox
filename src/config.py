@@ -60,14 +60,20 @@ class Settings(BaseSettings):
     # Day-trader cadence. Lower = higher frequency (bounded by the LLM's rate
     # limit). 60s is the safe default for the GitHub Models free tier.
     day_tick_seconds: int = 60
-    # Autopilot: when True the scheduler's day_tick calls the LLM (GitHub Models
-    # / OpenAI / Anthropic) to decide trades — the classic autonomous engine.
-    # Set False for COPILOT-DRIVEN mode: the scheduler stops making any LLM/PAT
-    # calls (no day_tick reasoning), and the reasoning is done by Copilot itself
-    # via the autonomous-day-trader skill (gather_context.py -> reason ->
-    # execute_trade.py). Stops, scans, reconcile and MTM keep running either way.
-    # The live `day_autopilot` setting (a runtime toggle) overrides this default.
+    # Autopilot mode for the scheduler's day_tick. The live `day_autopilot`
+    # setting (string) overrides this default and accepts THREE values:
+    #   'on'         — scheduler calls the LLM (GitHub Models/OpenAI/Anthropic)
+    #                  to decide trades (classic autonomous engine; uses the PAT).
+    #   'off'        — COPILOT-DRIVEN: scheduler makes NO LLM/PAT calls; Copilot
+    #                  is the brain (gather_context.py -> reason -> execute_trade.py).
+    #   'mechanical' — UNATTENDED, NO LLM/PAT: the scheduler runs a deterministic
+    #                  rules policy every tick (rank by heat_score, require news +
+    #                  analyst agreement, enforce caps/stops). Keeps trading with
+    #                  no human and no PAT. This bool default maps to 'on'/'off'.
+    # Stops, scans, reconcile and MTM run in every mode.
     day_autopilot: bool = True
+    # Mechanical-mode entry bar: only take ideas with heat_score >= this.
+    day_mechanical_heat_min: float = 60.0
     # Intraday scanner refresh. list_ideas only returns the LAST scan_run result,
     # so without a periodic refresh the idea universe (and its prices) goes stale.
     # scan_run rescans the universe and shares the sibling MCP subprocess with

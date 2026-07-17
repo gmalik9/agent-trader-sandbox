@@ -676,6 +676,72 @@ def test_idea_context_surfaces_holdings_and_book_full(tmp_db, stub_bars, monkeyp
     config.get_settings.cache_clear()
 
 
+def test_mechanical_enters_qualifying_idea_no_llm(tmp_db, stub_bars, monkeypatch):
+    """run_mechanical picks a qualifying idea and places it — with NO provider."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_DEFAULT_STOP_PCT", "0")
+    monkeypatch.setenv("DAY_MECHANICAL_HEAT_MIN", "50")
+    monkeypatch.setenv("DAY_NAME_COOLDOWN_SECONDS", "0")
+    from src import config
+    config.get_settings.cache_clear()
+
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars, mirror=True)
+
+    class IdeaShortTerm(FakeShortTerm):
+        def list_ideas(self, **kw):
+            return {"rows": [{"ticker": "AAPL", "direction": "long", "tier": "A",
+                              "heat_score": 80.0, "entry": 150.0, "stop": 147.0,
+                              "target": 156.0, "rr": 2.0, "signal_tags": "gapper"}]}
+        def get_news(self, ticker, **kw):
+            return {"articles": [{"headline": "upgrade", "sentiment": 0.4, "source": "x"},
+                                 {"headline": "beat", "sentiment": 0.3, "source": "y"}]}
+
+    class BullAnalyst:
+        def start(self): pass
+        def stop(self): pass
+        def lookup_ticker(self, sym, **kw):
+            return {"rating": "Buy", "target_price": 200, "upside_pct": 30}
+        def get_news(self, *a, **k):
+            return {}
+
+    # provider=None → proves no LLM is used.
+    agent = DayTraderAgent(tmp_db, broker, IdeaShortTerm(), provider=None,
+                            now=MARKET_OPEN, long_term=BullAnalyst())
+    out = agent.run_mechanical()
+    assert out.status == "ok"
+    pos = {p.symbol: p.qty for p in broker.list_positions("day")}
+    assert pos.get("AAPL", 0) > 0          # entered the qualifying long
+    config.get_settings.cache_clear()
+
+
+def test_mechanical_skips_when_news_contradicts(tmp_db, stub_bars, monkeypatch):
+    """A long idea with strongly negative news is NOT entered by the rules policy."""
+    monkeypatch.setenv("DAY_MECHANICAL_HEAT_MIN", "50")
+    monkeypatch.setenv("DAY_NAME_COOLDOWN_SECONDS", "0")
+    from src import config
+    config.get_settings.cache_clear()
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars, mirror=True)
+
+    class BearNewsShortTerm(FakeShortTerm):
+        def list_ideas(self, **kw):
+            return {"rows": [{"ticker": "AAPL", "direction": "long", "tier": "A",
+                              "heat_score": 90.0, "entry": 150.0, "stop": 147.0,
+                              "rr": 2.0, "signal_tags": "gapper"}]}
+        def get_news(self, ticker, **kw):
+            return {"articles": [{"headline": "probe", "sentiment": -0.5, "source": "x"},
+                                 {"headline": "downgrade", "sentiment": -0.4, "source": "y"}]}
+
+    agent = DayTraderAgent(tmp_db, broker, BearNewsShortTerm(), provider=None,
+                            now=MARKET_OPEN, long_term=None)
+    out = agent.run_mechanical()
+    assert out.status == "ok"
+    assert broker.list_positions("day") == []   # skipped: news contradicts the long
+    config.get_settings.cache_clear()
+
+
 def test_daily_drawdown_halts(tmp_db, stub_bars):
     # Seed an equity_curve row that pins starting equity high, then current equity is low.
     broker = SandboxBroker(tmp_db, bar_provider=stub_bars)

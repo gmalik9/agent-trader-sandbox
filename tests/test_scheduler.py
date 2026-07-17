@@ -43,6 +43,7 @@ def test_day_tick_skips_llm_when_autopilot_off(runner, monkeypatch):
     dbm.set_setting(runner.conn, "day_autopilot", "off")
     runner.job_day_tick()
     fake_day.run_once.assert_not_called()   # no LLM/PAT call in Copilot-driven mode
+    fake_day.run_mechanical.assert_not_called()
 
 
 def test_day_tick_runs_llm_when_autopilot_on(runner, monkeypatch):
@@ -53,6 +54,20 @@ def test_day_tick_runs_llm_when_autopilot_on(runner, monkeypatch):
     dbm.set_setting(runner.conn, "day_autopilot", "on")
     runner.job_day_tick()
     fake_day.run_once.assert_called_once()
+    fake_day.run_mechanical.assert_not_called()
+
+
+def test_day_tick_runs_mechanical_when_set(runner, monkeypatch):
+    """day_autopilot='mechanical' runs the deterministic (no-LLM) tick."""
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: True)
+    fake_day = MagicMock()
+    monkeypatch.setattr(runner, "_day_agent", lambda: fake_day)
+    from src.sandbox import db as dbm
+    dbm.set_setting(runner.conn, "day_autopilot", "mechanical")
+    runner.job_day_tick()
+    fake_day.run_mechanical.assert_called_once()
+    fake_day.run_once.assert_not_called()   # no LLM/PAT call
+
 
 
 

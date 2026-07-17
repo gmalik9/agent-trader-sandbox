@@ -77,24 +77,27 @@ never print or commit them.
 | `DAY_COMPACT_MODE` | optional (default `false`) | default for compact requests (live `compact_prompt` setting overrides) |
 | `CAPITAL_TOTAL` / `SPLIT_DAY_PCT` | optional | bankroll + day/long split |
 
-## Copilot-driven vs scheduler-autopilot
+## Copilot-driven vs mechanical vs scheduler-autopilot (`day_autopilot`)
 
-- **Copilot-driven (this skill's default): `day_autopilot=off`.** The scheduler
-  makes **no** LLM/API calls — `job_day_tick` short-circuits. Copilot is the
-  brain: it reads `gather_context.py`, reasons, and acts via `execute_trade.py`.
-  The scheduler still runs the LLM-free jobs (stop monitor ~30 s, scan refresh,
-  reconcile, MTM), so the book stays protected between Copilot turns. **This is
-  how you avoid hitting the GitHub Models PAT / rate limits.**
-- **Scheduler-autopilot: `day_autopilot=on`.** The classic engine — `job_day_tick`
-  calls the configured LLM (`LLM_PROVIDER`) every `DAY_TICK_SECONDS` to trade on
-  its own, bounded by that provider's rate limits. Use when no Copilot session is
-  open.
+Live toggle (no rebuild). Stops, scan refresh, reconcile, MTM and the end-of-day
+force-flat run in **every** mode.
 
-Toggle live (no rebuild):
+- **`mechanical` — unattended loop, no LLM/PAT.** The scheduler's `job_day_tick`
+  runs a deterministic rules policy every `DAY_TICK_SECONDS`: rank ideas by
+  `heat_score`, require news sentiment to agree with the direction + analyst not
+  strongly contradicting, size/enter through the same caps + live-stop engine,
+  and rotate out the weakest loser when the book is full. Keeps trading all day
+  with no human and no PAT. `DAY_MECHANICAL_HEAT_MIN` sets the entry bar.
+- **`off` — Copilot-driven.** `job_day_tick` short-circuits (no LLM call). Copilot
+  is the brain: read `gather_context.py`, reason, act via `execute_trade.py`.
+- **`on` — scheduler LLM autopilot.** `job_day_tick` calls the configured LLM
+  (`LLM_PROVIDER`) — uses the PAT, bounded by that provider's rate limits.
+
+Set it:
 ```bash
 docker compose exec -T scheduler python -c \
  "from src.sandbox import db as d; from src.config import db_path; \
-  d.set_setting(d.get_conn(db_path()),'day_autopilot','off')"   # or 'on'
+  d.set_setting(d.get_conn(db_path()),'day_autopilot','mechanical')"  # or 'off' / 'on'
 ```
 
 News-source keys the skill may use (all optional, all in `secrets.toml` / env,
