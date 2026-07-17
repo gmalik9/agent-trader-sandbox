@@ -77,27 +77,23 @@ never print or commit them.
 | `DAY_COMPACT_MODE` | optional (default `false`) | default for compact requests (live `compact_prompt` setting overrides) |
 | `CAPITAL_TOTAL` / `SPLIT_DAY_PCT` | optional | bankroll + day/long split |
 
-## Copilot-driven vs mechanical vs scheduler-autopilot (`day_autopilot`)
+## Copilot-driven vs scheduler-autopilot (`day_autopilot`)
 
 Live toggle (no rebuild). Stops, scan refresh, reconcile, MTM and the end-of-day
-force-flat run in **every** mode.
+force-flat run in **both** modes. The two never both trade — pick one:
 
-- **`mechanical` — unattended loop, no LLM/PAT.** The scheduler's `job_day_tick`
-  runs a deterministic rules policy every `DAY_TICK_SECONDS`: rank ideas by
-  `heat_score`, require news sentiment to agree with the direction + analyst not
-  strongly contradicting, size/enter through the same caps + live-stop engine,
-  and rotate out the weakest loser when the book is full. Keeps trading all day
-  with no human and no PAT. `DAY_MECHANICAL_HEAT_MIN` sets the entry bar.
-- **`off` — Copilot-driven.** `job_day_tick` short-circuits (no LLM call). Copilot
-  is the brain: read `gather_context.py`, reason, act via `execute_trade.py`.
-- **`on` — scheduler LLM autopilot.** `job_day_tick` calls the configured LLM
-  (`LLM_PROVIDER`) — uses the PAT, bounded by that provider's rate limits.
+- **`off` — Copilot-driven (this skill).** `job_day_tick` short-circuits (no LLM
+  call). Copilot is the brain: read `gather_context.py`, reason, act via
+  `execute_trade.py`. No PAT, no rate-limit ceiling.
+- **`on` — the standalone scheduler agent.** `job_day_tick` calls the configured
+  LLM (`LLM_PROVIDER`) every `DAY_TICK_SECONDS` and trades on its own — the
+  classic engine, unchanged. Uses the PAT; bounded by that provider's limits.
 
 Set it:
 ```bash
 docker compose exec -T scheduler python -c \
  "from src.sandbox import db as d; from src.config import db_path; \
-  d.set_setting(d.get_conn(db_path()),'day_autopilot','mechanical')"  # or 'off' / 'on'
+  d.set_setting(d.get_conn(db_path()),'day_autopilot','off')"   # or 'on'
 ```
 
 News-source keys the skill may use (all optional, all in `secrets.toml` / env,

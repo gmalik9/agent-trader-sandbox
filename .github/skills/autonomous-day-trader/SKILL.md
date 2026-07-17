@@ -46,42 +46,35 @@ Models PAT is never hit and there's no rate-limit ceiling on decisions.
 2. **Learn** — journal observations, actions, trades and lessons, and evolve
    `data/strategy_notes.md` so decisions keep improving over time.
 > VS Code Copilot is turn-based and cannot literally self-trigger every 60 s
-> while unattended. Two ways to "keep trading without intervention":
-> **(a)** run the built-in **unattended loop** — set `day_autopilot=mechanical`
-> and the scheduler applies the same rules every minute with NO LLM/PAT call; or
-> **(b)** during a working session, drive the gather→reason→act loop yourself as
-> Copilot (bounded by the turn). Either way the scheduler's LLM-free jobs (stop
-> monitor every ~30 s, end-of-day force-flat, scan refresh, reconcile) protect
-> the book. Keep the `scheduler` container running.
+> while fully unattended. **The skill's autonomous loop is COPILOT ITSELF
+> iterating** the gather→reason→act cycle within a working session (see "The
+> loop" below) — that is what's different from the existing scheduler agent, and
+> it uses no PAT. Between your turns the scheduler's LLM-free jobs (stop monitor
+> every ~30 s, end-of-day force-flat, scan refresh, reconcile) protect the book.
+> Keep the `scheduler` container running.
 
 ## Autonomy modes (`day_autopilot`, live toggle — no rebuild)
 
-- **`mechanical` — UNATTENDED loop, no LLM/PAT (use this for hands-off "keeps
-  trading" all day):** the scheduler runs a deterministic rules policy every
-  minute — rank ideas by `heat_score`, require news sentiment to agree with the
-  direction and the analyst rating not to strongly contradict, then size/enter
-  through the same caps + live-stop engine; rotate out the weakest loser when the
-  book is full. No model call, so no PAT and no rate-limit ceiling. This is the
-  loop that keeps trading with no human present.
-- **`off` — Copilot-driven (Copilot is the brain):** the scheduler makes NO LLM
-  calls; you (Copilot) reason over `gather_context.py` each minute and act via
-  `execute_trade.py`. Best while you have a session open and want the model's
-  judgment on each decision.
-- **`on` — scheduler LLM autopilot:** the scheduler's `day_tick` calls the
-  configured LLM (GitHub Models / OpenAI / Anthropic) — uses the PAT and is
-  bounded by that provider's rate limits.
+The existing scheduler agent and this skill are **separate**, chosen by one
+setting so they never both trade at once:
+
+- **`off` — Copilot-driven (this skill):** the scheduler makes NO LLM/PAT calls;
+  **Copilot is the brain** — you loop over `gather_context.py` → reason →
+  `execute_trade.py` each minute. This is the skill's autonomous mode.
+- **`on` — the existing scheduler agent:** the scheduler's `day_tick` calls the
+  configured LLM (GitHub Models / OpenAI / Anthropic) and trades on its own —
+  the classic engine, unchanged. Uses the PAT; bounded by that provider's rate
+  limits.
 
 Set the mode:
 ```bash
 docker compose exec -T scheduler python -c \
  "from src.sandbox import db as d; from src.config import db_path; \
-  d.set_setting(d.get_conn(db_path()),'day_autopilot','mechanical')"  # or 'off' / 'on'
+  d.set_setting(d.get_conn(db_path()),'day_autopilot','off')"   # 'off' = skill/Copilot ; 'on' = scheduler agent
 ```
 
-**Recommended for "runs all day without intervention": `mechanical`.** Then use
-Copilot to supervise — run `session_snapshot.py`, journal observations, and
-switch to `off` + `execute_trade.py` whenever you want to override a specific
-trade with the model's judgment.
+Use `off` while you're running the skill (Copilot trades); use `on` to hand
+control back to the standalone scheduler agent when no Copilot session is open.
 
 ## Procedure
 
@@ -92,11 +85,9 @@ trade with the model's judgment.
    full env-var table and the news/Alpaca API keys the skill is allowed to use).
 2. Start the stack: `./trader start` (or `./trader rebuild` after code changes —
    **`restart` does NOT reload code**; the image bakes `app.py`/`src/`).
-3. **Choose the mode** (see "Autonomy modes"):
-   - Hands-off all day → `day_autopilot=mechanical` (unattended loop, no PAT).
-   - Copilot-as-brain during a session → `day_autopilot=off` and run the trade
-     loop below.
-   `docker compose exec -T scheduler python -c "from src.sandbox import db as d; from src.config import db_path; d.set_setting(d.get_conn(db_path()),'day_autopilot','mechanical')"`
+3. **Enter Copilot-driven mode** so the standalone scheduler agent stands down
+   and the skill (Copilot) is the trader — no PAT calls:
+   `docker compose exec -T scheduler python -c "from src.sandbox import db as d; from src.config import db_path; d.set_setting(d.get_conn(db_path()),'day_autopilot','off')"`
 4. Confirm health + market state with the snapshot:
    `docker compose exec -T scheduler python .github/skills/autonomous-day-trader/scripts/session_snapshot.py`
 5. Read yesterday's lessons: open `data/strategy_notes.md` and the tail of
@@ -104,7 +95,13 @@ trade with the model's judgment.
 6. Journal a session-open entry (bias, watch-list themes, plan) with
    `scripts/journal_append.py` (see step "Journal").
 
-### 1. Trade loop (every minute while the market is open)
+### 1. The loop — keep trading without intervention (Copilot iterates this)
+
+**This is the skill's autonomous loop: YOU (Copilot) repeat steps a–d below,
+once per minute, for as long as your working session runs.** Each pass is a full
+trade decision made by Copilot's own model — no PAT, no external LLM call. After
+acting, wait ~60 s (or re-run when prompted) and go again. The scheduler's stop
+monitor protects open positions between passes and force-flattens at 15:55 ET.
 
 **a. Gather** — one JSON dump of everything you need to decide (market state,
 account, current book with per-holding P&L + distance-to-stop, and the top
@@ -192,10 +189,10 @@ human over time."
 
 ## Runtime tuning (no rebuild — live toggles in SQLite `settings`)
 
-- **Autopilot** (`day_autopilot`): `mechanical` = unattended rules loop (no PAT);
-  `off` = Copilot-driven (you are the brain); `on` = scheduler calls the LLM.
-  This skill uses `mechanical` for hands-off operation and `off` for supervised
-  Copilot trading.
+- **Autopilot** (`day_autopilot`): `off` = Copilot-driven (this skill trades; the
+  standalone scheduler agent stands down; no PAT). `on` = the existing scheduler
+  agent trades on its own via the LLM (uses the PAT). Use `off` while running the
+  skill, `on` to hand control back to the standalone agent.
 - **Compact mode** (`compact_prompt`): only relevant in autopilot `on` mode —
   turn ON when the scheduler's LLM is throttled (429/413) so requests fit the
   free-tier fallback model. Irrelevant in Copilot-driven mode (no PAT calls).
