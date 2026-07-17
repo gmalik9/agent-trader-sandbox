@@ -34,6 +34,28 @@ def test_register_jobs_attaches_expected_ids(runner):
                         "stop_monitor", "long_tick", "coord_tick", "tick_poll"}
 
 
+def test_day_tick_skips_llm_when_autopilot_off(runner, monkeypatch):
+    """With day_autopilot off (Copilot-driven), job_day_tick makes NO LLM call."""
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: True)
+    fake_day = MagicMock()
+    monkeypatch.setattr(runner, "_day_agent", lambda: fake_day)
+    from src.sandbox import db as dbm
+    dbm.set_setting(runner.conn, "day_autopilot", "off")
+    runner.job_day_tick()
+    fake_day.run_once.assert_not_called()   # no LLM/PAT call in Copilot-driven mode
+
+
+def test_day_tick_runs_llm_when_autopilot_on(runner, monkeypatch):
+    monkeypatch.setattr("src.scheduler.runner.is_market_open", lambda _now: True)
+    fake_day = MagicMock()
+    monkeypatch.setattr(runner, "_day_agent", lambda: fake_day)
+    from src.sandbox import db as dbm
+    dbm.set_setting(runner.conn, "day_autopilot", "on")
+    runner.job_day_tick()
+    fake_day.run_once.assert_called_once()
+
+
+
 def test_tick_poll_consumes_request_and_dispatches(runner, monkeypatch):
     # Patch the agent factories so we don't need an LLM provider.
     fake_day = MagicMock()

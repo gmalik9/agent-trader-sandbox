@@ -73,8 +73,29 @@ never print or commit them.
 | `FINNHUB_API_KEY` | optional | news / earnings; passed to MCP subprocesses |
 | `ALPHAVANTAGE_API_KEY` | optional | news; passed to MCP subprocesses |
 | `SCAN_UNIVERSE` | optional (default `sp500`) | `liquid` \| `sp500` \| `all` |
+| `DAY_AUTOPILOT` | optional (default `true`) | `false` = Copilot-driven (no scheduler LLM/PAT calls); live `day_autopilot` setting overrides |
 | `DAY_COMPACT_MODE` | optional (default `false`) | default for compact requests (live `compact_prompt` setting overrides) |
 | `CAPITAL_TOTAL` / `SPLIT_DAY_PCT` | optional | bankroll + day/long split |
+
+## Copilot-driven vs scheduler-autopilot
+
+- **Copilot-driven (this skill's default): `day_autopilot=off`.** The scheduler
+  makes **no** LLM/API calls — `job_day_tick` short-circuits. Copilot is the
+  brain: it reads `gather_context.py`, reasons, and acts via `execute_trade.py`.
+  The scheduler still runs the LLM-free jobs (stop monitor ~30 s, scan refresh,
+  reconcile, MTM), so the book stays protected between Copilot turns. **This is
+  how you avoid hitting the GitHub Models PAT / rate limits.**
+- **Scheduler-autopilot: `day_autopilot=on`.** The classic engine — `job_day_tick`
+  calls the configured LLM (`LLM_PROVIDER`) every `DAY_TICK_SECONDS` to trade on
+  its own, bounded by that provider's rate limits. Use when no Copilot session is
+  open.
+
+Toggle live (no rebuild):
+```bash
+docker compose exec -T scheduler python -c \
+ "from src.sandbox import db as d; from src.config import db_path; \
+  d.set_setting(d.get_conn(db_path()),'day_autopilot','off')"   # or 'on'
+```
 
 News-source keys the skill may use (all optional, all in `secrets.toml` / env,
 consumed by the scanner MCP): `FINNHUB_API_KEY`, `ALPHAVANTAGE_API_KEY`, plus any

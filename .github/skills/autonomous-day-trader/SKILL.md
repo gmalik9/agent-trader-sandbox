@@ -1,6 +1,6 @@
 ---
 name: autonomous-day-trader
-description: 'Run and supervise an autonomous, self-learning PAPER day-trading agent on Alpaca. USE FOR: starting/monitoring the day-trading engine; pulling ranked intraday ideas + news + analyst views; placing/exiting PAPER trades on Alpaca; journaling market observations, actions and trades to a durable learning log; running an end-of-day review that extracts lessons and evolves a strategy playbook; tuning runtime toggles (compact mode, scan universe, kill-switch). Goal: maximize daily risk-adjusted return while preserving capital. PAPER/SIMULATED ONLY — there is no live-money path. DO NOT USE FOR: live/real-money trading; unrelated coding tasks.'
+description: 'Run an autonomous, self-learning PAPER day-trader where COPILOT ITSELF is the trading brain (no GitHub Models PAT / no external LLM API call). USE FOR: gathering ranked intraday ideas + news + analyst views as one context dump; reasoning over them in Copilot; placing/exiting PAPER trades on Alpaca via an LLM-free execution script (sizing, caps, stops, logging all applied); journaling observations/actions/trades/lessons to a durable log; end-of-day review that evolves a strategy playbook; toggling autopilot (Copilot-driven vs scheduler-LLM), compact mode, kill-switch. Goal: maximize daily risk-adjusted return while preserving capital. PAPER/SIMULATED ONLY \u2014 no live-money path. DO NOT USE FOR: live/real-money trading; unrelated coding tasks.'
 argument-hint: '[start | check | trade | journal | review]'
 ---
 
@@ -32,27 +32,40 @@ Three cooperating repos (see [architecture-and-setup.md](./references/architectu
   positions, order placement, close) + analyst views. Consumed via MCP.
 
 The **truly autonomous background execution is the Docker `scheduler`
-service** — it ticks the agent and monitors stops on its own, all day, no human
-needed. **Your role via this skill is twofold:**
+service** — it monitors stops, refreshes ideas, and reconciles orders on its
+own, all day. **In COPILOT-DRIVEN mode (the intended mode for this skill),
+Copilot is the trading brain** — the scheduler makes NO LLM/API calls, and you
+(the model running in Copilot) do the reasoning each minute, so the GitHub
+Models PAT is never hit and there's no rate-limit ceiling on decisions.
 
-1. **Supervise** the engine — start it, confirm it's healthy and trading, tune
-   runtime toggles when the market or LLM quota demands it.
-2. **Learn** — review what happened every minute, journal observations and
-   lessons, and evolve `data/strategy_notes.md` so the agent keeps improving.
+**Your role via this skill is twofold:**
 
-> VS Code Copilot is turn-based and cannot itself sit unattended for 6.5 hours.
-> The scheduler provides the unattended execution; this skill makes each of your
-> check-ins productive and cumulative. For true 24/7 autonomy, keep the
-> `scheduler` container running.
+1. **Trade** — each minute, read the market context, decide, and act (place /
+   exit trades) using the LLM-free execution scripts. Copilot's own model does
+   the reasoning; the engine applies sizing, caps, stops, and logging.
+2. **Learn** — journal observations, actions, trades and lessons, and evolve
+   `data/strategy_notes.md` so decisions keep improving over time.
+
+> VS Code Copilot is turn-based and cannot literally self-trigger every 60 s
+> while unattended — you drive the minute-by-minute loop during a working
+> session, and the scheduler's LLM-free jobs (stop monitor every ~30 s, scan
+> refresh, reconcile) keep protecting the book between your turns. Keep the
+> `scheduler` container running so stops are always enforced.
 
 ## Autonomy modes
 
-- **Supervised-autonomous (recommended):** the `scheduler` container trades
-  continuously; you check in **every minute while the market is open** to review,
-  journal, and tune. This is what "runs all day without intervention" means in
-  practice.
-- **Direct:** within a session, drive individual ticks and place/exit trades
-  yourself, journaling as you go. Use for debugging or hands-on trading.
+- **Copilot-driven (intended — no PAT calls):** turn autopilot OFF so the
+  scheduler stops calling the LLM; Copilot reasons over `gather_context.py` each
+  minute and acts via `execute_trade.py`. The scheduler still runs the LLM-free
+  stop monitor / scan refresh / reconcile. This is what "handled by the model in
+  Copilot, not the PAT" means.
+- **Scheduler autopilot (fallback):** turn autopilot ON and the scheduler's
+  `day_tick` calls the configured LLM (GitHub Models / OpenAI / Anthropic) to
+  trade autonomously. Use when you want it to run with no Copilot session open —
+  but it is bounded by that provider's rate limits.
+
+Toggle live (no rebuild): `day_autopilot` = `off` (Copilot-driven) / `on`
+(scheduler). See "Runtime tuning" below.
 
 ## Procedure
 
@@ -63,42 +76,69 @@ needed. **Your role via this skill is twofold:**
    full env-var table and the news/Alpaca API keys the skill is allowed to use).
 2. Start the stack: `./trader start` (or `./trader rebuild` after code changes —
    **`restart` does NOT reload code**; the image bakes `app.py`/`src/`).
-3. Confirm health + market state with the snapshot:
+3. **Enter Copilot-driven mode** — turn off the scheduler's LLM so no PAT calls
+   are made and Copilot is the brain:
+   `docker compose exec -T scheduler python -c "from src.sandbox import db as d; from src.config import db_path; d.set_setting(d.get_conn(db_path()),'day_autopilot','off')"`
+4. Confirm health + market state with the snapshot:
    `docker compose exec -T scheduler python .github/skills/autonomous-day-trader/scripts/session_snapshot.py`
-4. Read yesterday's lessons: open `data/strategy_notes.md` and the tail of
+5. Read yesterday's lessons: open `data/strategy_notes.md` and the tail of
    `data/trader_journal.jsonl`. Carry forward what worked / what to avoid.
-5. Journal a session-open entry (bias, watch-list themes, plan) with
+6. Journal a session-open entry (bias, watch-list themes, plan) with
    `scripts/journal_append.py` (see step "Journal").
 
-### 1. Check-in (every minute while the market is open)
+### 1. Trade loop (every minute while the market is open)
 
-Run the snapshot script and read it critically:
-- Is the agent ticking (recent `ok` runs)? Is it throttled (`rate_limited` /
-  `413`)? If throttled, enable **compact mode** (see tuning below).
-- Current positions, per-name %, gross exposure, unrealized P&L.
-- Today's decisions and any rejects (`insufficient_diligence`, `theme_at_cap`,
-  `max_concurrent_positions`, `size_rounded_to_zero`).
-- Stops: are open positions protected (active `position_plans`)?
+**a. Gather** — one JSON dump of everything you need to decide (market state,
+account, current book with per-holding P&L + distance-to-stop, and the top
+ranked ideas each enriched with news sentiment + analyst view — the REQUIRED
+diligence):
 
-If you spot something the mechanical agent can't judge (a regime shift, a
-crowded one-way book, a news catalyst it's ignoring), **journal the observation**
-and, if warranted, act (place/exit a trade, or tune a toggle).
+```bash
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/gather_context.py --ideas 6 --news 6
+```
 
-### 2. Trade (when you take a discretionary action)
+**b. Reason (you, Copilot — this is the "LLM", no PAT).** Apply the discipline in
+[trading-rules.md](./references/trading-rules.md): pick 0–3 best setups with a
+news + analyst cross-check, a defined stop, and ≥ 2:1 R:R; if `book_full`, choose
+the weakest holding to exit first. Also review holdings — cut losers / invalidated
+theses.
 
-Follow the discipline in [trading-rules.md](./references/trading-rules.md) —
-this is non-negotiable and mirrors the enforced rules:
+**c. Act** — for each decision, call the LLM-free executor (it applies inverse-ETF
+substitution, price sanity, sizing, caps, the live stop plan and audit logging):
+
+```bash
+# open a position
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/execute_trade.py --enter \
+  --symbol AAPL --side buy --entry 150.00 --stop 143.00 --target 164.00 \
+  --thesis "Breakout > VWAP; positive news + Buy rating; 2:1 R:R"
+
+# free a slot / cut a loser / take profit
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/execute_trade.py --exit \
+  --symbol PINS --reason "weakest holding; thesis stalled; rotating"
+```
+
+**d. Journal** the observation/action (see "Journal"). Then repeat next minute.
+
+If nothing qualifies, do nothing — journal a brief `observation` and move on.
+
+### 2. Trade discipline (always)
+
+Follow [trading-rules.md](./references/trading-rules.md) — non-negotiable and
+mirrors the engine's enforced rules:
 - **Diligence gate:** never enter without checking news **and** analyst view for
-  that symbol.
+  that symbol (both are in the `gather_context.py` output per idea).
 - **Defined risk:** every entry needs an explicit stop and ≥ 2:1 reward:risk.
 - **Caps:** ≤ ~20% equity per name, ≤ ~35% per correlation theme, ≤ 8 concurrent
   positions. If the book is full, **exit the weakest** before adding.
 - **Time-of-day:** no new entries after 15:30 ET; everything auto-flattens 15:55 ET.
 
-Place/exit through the running agent's broker (it applies stops, caps, and
-logging automatically). Prefer queuing a tick or using the existing tools over
-raw Alpaca calls; see [trading-rules.md](./references/trading-rules.md) for the
-exact commands.
+`execute_trade.py` runs the same sizing/caps/stop/logging engine as an autonomous
+tick — just with Copilot as the brain instead of an API call. It still rejects a
+trade that breaks a cap (returns `rejected` with a reason). See
+[trading-rules.md](./references/trading-rules.md) for the full command reference.
 
 ### 3. Journal (continuously — this is the "self-learning")
 
@@ -134,10 +174,12 @@ human over time."
 
 ## Runtime tuning (no rebuild — live toggles in SQLite `settings`)
 
-- **Compact mode** (`compact_prompt`): turn ON when the LLM is throttled (429/413)
-  so requests fit the free-tier fallback model and the agent keeps trading. Flip
-  in the Streamlit **Settings** tab, or:
-  `docker compose exec -T scheduler python -c "from src.sandbox import db as d; from src.config import db_path; d.set_setting(d.get_conn(db_path()),'compact_prompt','on')"`
+- **Autopilot** (`day_autopilot`): `off` = **Copilot-driven** (scheduler makes no
+  LLM/PAT calls; you are the brain). `on` = scheduler's `day_tick` calls the
+  configured LLM to trade on its own. This skill assumes `off`.
+- **Compact mode** (`compact_prompt`): only relevant in autopilot `on` mode —
+  turn ON when the scheduler's LLM is throttled (429/413) so requests fit the
+  free-tier fallback model. Irrelevant in Copilot-driven mode (no PAT calls).
 - **Kill switch** (`kill_switch`): set `on` to halt all agents within one tick
   (positions untouched). Use if something looks wrong.
 - **Scan universe** (`SCAN_UNIVERSE` env: `sp500` default, `liquid`, `all`) and
@@ -169,6 +211,12 @@ human over time."
 
 ## Scripts
 
+- [gather_context.py](./scripts/gather_context.py) — **Copilot's eyes**: one JSON
+  dump of market state + account + book (P&L, distance-to-stop) + top ranked
+  ideas enriched with news + analyst (read-only; no LLM/PAT call).
+- [execute_trade.py](./scripts/execute_trade.py) — **Copilot's hands**: place
+  (`--enter`) or close (`--exit`) a trade through the real engine (sizing, caps,
+  inverse-ETF substitution, live stop plan, audit logging) — no LLM call.
 - [session_snapshot.py](./scripts/session_snapshot.py) — health + positions +
   today's decisions + P&L + throttle state (read-only).
 - [journal_append.py](./scripts/journal_append.py) — append a structured entry

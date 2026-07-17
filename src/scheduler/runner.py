@@ -236,6 +236,11 @@ class SchedulerRunner:
     def job_day_tick(self) -> None:
         if not is_market_open(now_utc()):
             return
+        if not self._autopilot_enabled():
+            # COPILOT-DRIVEN mode: don't make any LLM/PAT calls here — Copilot
+            # does the reasoning via the autonomous-day-trader skill. Stops,
+            # scans, reconcile and MTM keep running via their own jobs.
+            return
         self._day_tick_started_at = time.monotonic()
         try:
             self._day_agent().run_once()
@@ -243,6 +248,20 @@ class SchedulerRunner:
             log.exception("day_tick failed")
         finally:
             self._day_tick_started_at = None
+
+    def _autopilot_enabled(self) -> bool:
+        """Whether the scheduler should run the LLM day_tick itself.
+
+        The live `day_autopilot` setting ('on'/'off') wins if present; otherwise
+        fall back to the DAY_AUTOPILOT config default. Set 'off' to hand the
+        reasoning to Copilot (no PAT/LLM calls from the scheduler)."""
+        try:
+            val = dbm.get_setting(self.conn, "day_autopilot")
+        except Exception:
+            val = None
+        if val is not None:
+            return str(val).strip().lower() in ("1", "true", "yes", "on")
+        return bool(getattr(self.settings, "day_autopilot", True))
 
     def job_stop_monitor(self) -> None:
         # Cheap, LLM-free guard: enforce each open day-position's stop/target
