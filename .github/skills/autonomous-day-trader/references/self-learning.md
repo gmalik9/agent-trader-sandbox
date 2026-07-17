@@ -79,8 +79,9 @@ loaded at every session start and is what makes the agent improve. Example:
 
 1. **Session start:** read `strategy_notes.md` + tail of the journal → journal a
    `session_open` with today's plan.
-2. **Intraday check-ins:** run `session_snapshot.py`; journal `observation`s and
-   `action`s; take/adjust trades per [trading-rules.md](./trading-rules.md).
+2. **Intraday check-ins (every minute):** run `session_snapshot.py`; journal
+   `observation`s and `action`s; take/adjust trades per
+   [trading-rules.md](./trading-rules.md).
 3. **After close (flat):** run `end_of_day_review.py` → it appends a
    `session_close` review summarizing fills, P&L, decisions, throttle time.
 4. **Distil:** read the review + the day's `reasoning_log.jsonl`; write 1–3

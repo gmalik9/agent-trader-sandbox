@@ -37,7 +37,7 @@ needed. **Your role via this skill is twofold:**
 
 1. **Supervise** the engine — start it, confirm it's healthy and trading, tune
    runtime toggles when the market or LLM quota demands it.
-2. **Learn** — periodically review what happened, journal observations and
+2. **Learn** — review what happened every minute, journal observations and
    lessons, and evolve `data/strategy_notes.md` so the agent keeps improving.
 
 > VS Code Copilot is turn-based and cannot itself sit unattended for 6.5 hours.
@@ -48,9 +48,9 @@ needed. **Your role via this skill is twofold:**
 ## Autonomy modes
 
 - **Supervised-autonomous (recommended):** the `scheduler` container trades
-  continuously; you check in periodically (e.g. open, midday, power hour, close)
-  to review, journal, and tune. This is what "runs all day without
-  intervention" means in practice.
+  continuously; you check in **every minute while the market is open** to review,
+  journal, and tune. This is what "runs all day without intervention" means in
+  practice.
 - **Direct:** within a session, drive individual ticks and place/exit trades
   yourself, journaling as you go. Use for debugging or hands-on trading.
 
@@ -70,7 +70,7 @@ needed. **Your role via this skill is twofold:**
 5. Journal a session-open entry (bias, watch-list themes, plan) with
    `scripts/journal_append.py` (see step "Journal").
 
-### 1. Check-in (every ~30–60 min while the market is open)
+### 1. Check-in (every minute while the market is open)
 
 Run the snapshot script and read it critically:
 - Is the agent ticking (recent `ok` runs)? Is it throttled (`rate_limited` /
