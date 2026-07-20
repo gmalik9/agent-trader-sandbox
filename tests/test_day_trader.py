@@ -92,6 +92,7 @@ def test_agent_can_proactively_exit_position(tmp_db, stub_bars, monkeypatch):
     """The agent can close a held position via the exit_position tool."""
     monkeypatch.setenv("SLIPPAGE_BPS", "0")
     monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_MIN_HOLD_SECONDS", "0")
     from src import config
     config.get_settings.cache_clear()
     stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
@@ -106,6 +107,32 @@ def test_agent_can_proactively_exit_position(tmp_db, stub_bars, monkeypatch):
     assert out.status == "ok"
     assert broker.list_positions("day") == []              # agent closed it
     assert any("agent_exit" in d for d in out.decisions)   # recorded
+    config.get_settings.cache_clear()
+
+
+def test_exit_position_respects_min_hold_grace_period(tmp_db, stub_bars, monkeypatch):
+    """A just-opened position cannot be proactively rotated out immediately."""
+    monkeypatch.setenv("SLIPPAGE_BPS", "0")
+    monkeypatch.setenv("COMMISSION_BPS", "0")
+    monkeypatch.setenv("DAY_MIN_HOLD_SECONDS", "300")
+    monkeypatch.setenv("DAY_REQUIRE_DILIGENCE", "false")
+    from src import config
+    config.get_settings.cache_clear()
+    stub_bars.set("AAPL", o=150, h=151, l=149, c=150)
+    broker = SandboxBroker(tmp_db, bar_provider=stub_bars)
+    # Open a fresh position and record its stop plan via the normal pipeline.
+    prov = ScriptedProvider([_propose("AAPL", 150.0, 143.0), ChatResult(text="done")])
+    agent = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov, now=MARKET_OPEN)
+    out = agent.run_once()
+    assert out.status == "ok"
+    assert broker.list_positions("day")
+    # New tick immediately tries to rotate it out -> should be blocked by min hold.
+    prov2 = ScriptedProvider([_exit("AAPL", "weakest"), ChatResult(text="done")])
+    agent2 = DayTraderAgent(tmp_db, broker, FakeShortTerm(), provider=prov2, now=MARKET_OPEN)
+    out2 = agent2.run_once()
+    assert out2.status == "ok"
+    assert broker.list_positions("day")                    # still held
+    assert not any("agent_exit" in d for d in out2.decisions)
     config.get_settings.cache_clear()
 
 

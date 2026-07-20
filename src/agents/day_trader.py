@@ -128,6 +128,17 @@ def _is_option_symbol(symbol: str) -> bool:
     return bool(_OCC_OPTION_RE.match((symbol or "").upper()))
 
 
+def _parse_iso(ts: str | None) -> datetime | None:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime (best-effort)."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
 SYSTEM_PROMPT = """You are "Atlas-Day", an elite discretionary intraday trader operating a PAPER trading account.
 Your sole objective is to maximize risk-adjusted equity growth TODAY while preserving capital.
 You are invoked approximately once per minute during market hours.
@@ -299,6 +310,11 @@ RISK GUARDRAILS (SYSTEM-ENFORCED; STILL RESPECT CONCEPTUALLY)
   invalidated thesis, or FREE A SLOT when the book is full (8 positions) and a
   clearly better setup is available. Review `current_positions` each tick and act
   on what you hold, don't only hunt for new entries.
+- DO NOT churn fresh entries. A position opened only moments ago can look like
+    the "weakest" simply from spread/noise. Respect `holdings.age_seconds` /
+    `eligible_to_rotate`: do NOT call `exit_position` on an ineligible fresh name
+    unless the live stop is hit (handled automatically) or genuinely new
+    information invalidates the thesis.
 
 ────────────────────────────────────────────────────────────────────────────
 REQUIRED JUSTIFICATION FOR EACH PROPOSAL
@@ -716,13 +732,26 @@ class DayTraderAgent(AgentBase):
                 theme_exposure[th] = theme_exposure.get(th, 0.0) + pct
                 # Per-holding detail so the agent can judge what to exit/rotate.
                 is_long = qty > 0
-                stop = plans_by_sym.get(sym, {}).get("stop_price")
+                plan = plans_by_sym.get(sym, {})
+                stop = plan.get("stop_price")
                 dist_to_stop_pct = None
                 if stop and mark > 0:
                     # +ve = comfortable room; near 0 = about to stop out.
                     dist_to_stop_pct = round(
                         (100.0 * (mark - stop) / mark) if is_long
                         else (100.0 * (stop - mark) / mark), 2)
+                age_seconds = None
+                eligible_to_rotate = True
+                created_at = plan.get("created_at")
+                if created_at:
+                    try:
+                        created_dt = _parse_iso(created_at)
+                        if created_dt is not None:
+                            age_seconds = max(0, int((datetime.now(timezone.utc) - created_dt).total_seconds()))
+                            min_hold = int(getattr(s, "day_min_hold_seconds", 180) or 0)
+                            eligible_to_rotate = age_seconds >= min_hold if min_hold > 0 else True
+                    except Exception:
+                        pass
                 holdings.append({
                     "symbol": sym,
                     "side": "long" if is_long else "short",
@@ -732,6 +761,8 @@ class DayTraderAgent(AgentBase):
                     "mark": round(mark, 4),
                     "stop": round(stop, 4) if stop else None,
                     "pct_to_stop": dist_to_stop_pct,
+                    "age_seconds": age_seconds,
+                    "eligible_to_rotate": eligible_to_rotate,
                     "theme": th,
                 })
             # Weakest holdings first: biggest losers, then closest to their stop —
@@ -761,9 +792,11 @@ class DayTraderAgent(AgentBase):
                     "BOOK IS FULL (max positions held). A new entry can only be placed "
                     "AFTER you free a slot. If a listed idea is clearly BETTER than your "
                     "weakest current holding (see `holdings`, sorted weakest-first: biggest "
-                    "loser / closest to stop), call `exit_position` on that weakest name, "
-                    "THEN propose the new one. If nothing beats what you hold, do not "
-                    "propose a new entry this tick.")
+                    "loser / closest to stop), call `exit_position` on the weakest name that "
+                    "is ALSO `eligible_to_rotate=true`, THEN propose the new one. Do NOT exit "
+                    "fresh entries opened only moments ago unless their thesis is genuinely "
+                    "invalidated. If nothing beats what you hold, do not propose a new entry "
+                    "this tick.")
             if used_tier != tier:
                 ctx["tier_requested"] = tier
                 ctx["tier_broadened_to"] = used_tier
@@ -822,6 +855,29 @@ class DayTraderAgent(AgentBase):
                 return {"error": f"positions_unavailable:{e}"}
             if sym not in held or abs(held[sym].qty) <= 1e-9:
                 return {"error": "not_held", "symbol": sym}
+            # Grace period: don't churn a just-opened position out at a tiny loss
+            # merely because it temporarily ranks as the weakest from spread/noise.
+            try:
+                from src.config import get_settings
+                min_hold = int(getattr(get_settings(), "day_min_hold_seconds", 180) or 0)
+                if min_hold > 0:
+                    aid = self._account_id()
+                    for pl in dbm.get_active_position_plans(self.conn, aid):
+                        if str(pl["symbol"]).upper() != sym:
+                            continue
+                        created_dt = _parse_iso(pl["created_at"])
+                        if created_dt is None:
+                            break
+                        age_seconds = max(0, int((datetime.now(timezone.utc) - created_dt).total_seconds()))
+                        if age_seconds < min_hold:
+                            return {
+                                "error": "min_hold_active",
+                                "symbol": sym,
+                                "detail": f"Position opened {age_seconds}s ago; wait {max(0, min_hold - age_seconds)}s before discretionary exit unless the stop is hit.",
+                            }
+                        break
+            except Exception:
+                log.debug("exit_position: min-hold check failed for %s", sym, exc_info=True)
             try:
                 res = self.broker.close_position(sym, sub_account=self.sub_account,
                                                   percentage=100.0)

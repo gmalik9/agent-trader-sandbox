@@ -146,6 +146,12 @@ class Settings(BaseSettings):
     #    idea list, forcing the agent to rotate into DIFFERENT names each tick.
     day_theme_max_pct: float = 0.35      # ≤35% of equity per correlation theme
     day_name_cooldown_seconds: int = 600  # 10 min per-name cooldown (0 disables)
+    # Minimum hold / grace period before the agent may proactively rotate out a
+    # newly-opened position via `exit_position`. This stops churn where the model
+    # opens a trade and then exits it 30-90s later merely because spread/noise
+    # makes it the temporary "weakest holding". Stops/targets still fire
+    # immediately via the stop monitor; this only blocks discretionary rotation.
+    day_min_hold_seconds: int = 180
     # Mandatory diligence: reject any new trade whose symbol did not receive BOTH
     # a get_news and a get_analyst_view call this tick. The checklist marks these
     # "required"; without enforcement the model skips them under time pressure and
