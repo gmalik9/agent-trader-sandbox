@@ -80,6 +80,24 @@ def do_enter(agent, args) -> dict:
                 d.target_price = float(args.target)
     orders = agent._place(decisions)
 
+    # Alpaca market orders return asynchronously as `pending_new`, so the engine's
+    # own `_place` skips recording the stop plan (it only records on a synchronous
+    # `filled`/`routed_external`). Without a plan the intraday monitor falls back
+    # to the loose 5% catch-all instead of the tight stop Copilot chose. Backfill
+    # the plan here for every accepted decision that has a stop (idempotent upsert
+    # keyed by symbol), so the intended stop/target is enforced immediately.
+    _status_by_symbol = {str(o.get("symbol")).upper(): str(o.get("status") or "")
+                         for o in orders}
+    for d in decisions:
+        if not d.accepted or not getattr(d, "stop_price", None):
+            continue
+        if _status_by_symbol.get(d.symbol.upper()) in ("filled", "routed_external"):
+            continue  # engine already recorded this one synchronously
+        try:
+            agent._record_plan(d, fill_price=None)
+        except Exception:
+            pass
+
     dec_dicts = [d.__dict__ for d in decisions]
     rid = agent._record_run(
         status="ok", prompt="copilot", response=args.thesis or "",

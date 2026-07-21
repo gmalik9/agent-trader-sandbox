@@ -146,13 +146,41 @@ def build_context(n_ideas: int, n_news: int) -> dict:
                                         "analyst_count", "sentiment") if k in av}
                 except Exception as e:  # noqa: BLE001
                     idea["analyst"] = {"error": str(e)[:80]}
+            sm = getattr(agent, "smart_money", None)
+            if sm is not None and getattr(sm, "available", False):
+                try:
+                    act = sm.symbol_activity(sym)
+                    if act.get("available"):
+                        idea["smart_money"] = {
+                            "overall_bias": act.get("overall_bias"),
+                            "insider_bias": (act.get("insider") or {}).get("bias"),
+                            "insider_net_value": (act.get("insider") or {}).get("net_value"),
+                            "political_bias": (act.get("political") or {}).get("bias"),
+                            "political_net_value": (act.get("political") or {}).get("net_value"),
+                        }
+                except Exception as e:  # noqa: BLE001
+                    idea["smart_money"] = {"error": str(e)[:80]}
             ideas.append(idea)
         out["ideas"] = ideas
+
+        # --- market-wide smart-money (insider C-suite + political) activity ---
+        sm = getattr(agent, "smart_money", None)
+        if sm is not None and getattr(sm, "available", False):
+            try:
+                out["smart_money_activity"] = sm.market_activity(limit=15)
+            except Exception as e:  # noqa: BLE001
+                out["smart_money_activity"] = {"available": False, "error": str(e)[:80]}
+        else:
+            out["smart_money_activity"] = {"available": False,
+                                           "reason": "no FMP_API_KEY/FINNHUB_API_KEY or disabled"}
+
         out["guidance"] = (
             "COPILOT-DRIVEN: you are the trader. Pick 0-3 best setups. REQUIRE a "
-            "news + analyst cross-check (already included per idea). Enter only with "
-            "a defined stop and >=2:1 R:R. If book_full, exit the weakest holding "
-            "first. Then call execute_trade.py to act. No new entries after 15:30 ET."
+            "news + analyst cross-check (already included per idea). Smart-money "
+            "(insider/political) is an OPTIONAL conviction tilt, not a trigger. "
+            "Enter only with a defined stop and >=2:1 R:R. If book_full, exit the "
+            "weakest holding first. Then call execute_trade.py to act. No new "
+            "entries after 15:30 ET."
         )
         return out
     finally:

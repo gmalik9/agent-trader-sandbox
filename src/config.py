@@ -122,6 +122,14 @@ class Settings(BaseSettings):
     # Optional upstream keys
     finnhub_api_key: str = ""
     alphavantage_api_key: str = ""
+    # Smart-money (insider C-suite + political / congressional) trade activity.
+    # Financial Modeling Prep (FMP) covers BOTH insider and congressional with a
+    # single key and is recommended; Finnhub (finnhub_api_key above) can supply
+    # insider-only as a fallback. With no key the signal is simply absent — the
+    # agent treats it as "no signal" and nothing breaks.
+    fmp_api_key: str = ""
+    smart_money_enabled: bool = True     # expose the insider/political tools
+    smart_money_lookback_days: int = 90  # window for aggregating disclosures
 
     # Sandbox engine knobs
     slippage_bps: float = 2.0

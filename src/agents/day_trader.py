@@ -355,11 +355,12 @@ SYSTEM_PROMPT_COMPACT = """You are "Atlas-Day", an intraday trader on a PAPER ac
 FLOW each tick:
 1) `list_intraday_ideas` — ranked candidates + your `portfolio` (holdings sorted WEAKEST-first, cash, `book_full`).
 2) MANAGE holdings: `exit_position` any name whose thesis is done/invalidated, a clear loser, or the weakest when a better idea exists. If `book_full` you MUST exit to free a slot before any new entry.
-3) For each NEW candidate, call BOTH `get_news` AND `get_analyst_view` (REQUIRED — a `propose_trade` missing either is auto-rejected) plus `get_quote` for structure/stop.
+3) For each NEW candidate, call BOTH `get_news` AND `get_analyst_view` (REQUIRED — a `propose_trade` missing either is auto-rejected) plus `get_quote` for structure/stop. Optionally call `get_smart_money` for a conviction tilt from disclosed insider (C-suite) / political (Congress) trades.
 4) `propose_trade` only setups with a clear trigger, a defined stop, and >=2:1 reward:risk. side='buy'=long (stop BELOW entry); side='sell'=short (stop ABOVE entry).
 
 RULES:
 - Stops are LIVE: a monitor closes each position at its stop or 2R target within ~30s, so a defined stop is real protection — act decisively on genuine edges (a well-structured SHORT counts).
+- Smart-money is an EDGE, not a requirement: a fresh cluster of insider/political BUYS supports a long and heavy insider SELLING is a caution flag, but never trade on it without the technical + news/analyst confirmation. `list_smart_money_activity` can surface names with unusual insider/political interest.
 - Bearish on a leveraged/inverse ETF: BUY its inverse (bearish semis -> buy SOXS); shorting them is auto-converted.
 - Diversify across UNCORRELATED themes. Per-name ~20%, per-theme ~35%, and 8-position caps are auto-enforced; don't fixate on one name/theme.
 - No new entries after 15:30 ET; all positions auto-closed 15:55 ET.
@@ -400,6 +401,34 @@ class DayTraderAgent(AgentBase):
 
     def _wall(self) -> datetime:
         return self._now or now_utc()
+
+    @property
+    def smart_money(self):
+        """Lazy insider/political trade-activity client (None when disabled).
+
+        Built on first use from settings so the constructor signature and all
+        existing call sites stay unchanged. Returns None if smart_money_enabled
+        is off; the client itself degrades gracefully when no API key is set.
+        """
+        cached = getattr(self, "_smart_money_client", "unset")
+        if cached != "unset":
+            return cached
+        from src.config import get_settings
+        s = get_settings()
+        client = None
+        if getattr(s, "smart_money_enabled", True):
+            try:
+                from src.smart_money import SmartMoneyClient
+                client = SmartMoneyClient(
+                    fmp_api_key=getattr(s, "fmp_api_key", "") or "",
+                    finnhub_api_key=getattr(s, "finnhub_api_key", "") or "",
+                    lookback_days=int(getattr(s, "smart_money_lookback_days", 90) or 90),
+                )
+            except Exception:
+                log.debug("smart_money client init failed", exc_info=True)
+                client = None
+        self._smart_money_client = client
+        return client
 
     # ---------------- main entrypoint ----------------
 
@@ -823,6 +852,28 @@ class DayTraderAgent(AgentBase):
             self._analyst_checked.add(str(symbol).upper())
             return self._analyst_view(symbol)
 
+        def get_smart_money(symbol: str) -> dict:
+            """Insider (C-suite / Form 4) + political (Congress) disclosed
+            trade activity for a symbol — an optional edge signal."""
+            sm = self.smart_money
+            if sm is None:
+                return {"available": False, "reason": "smart_money_disabled"}
+            try:
+                return sm.symbol_activity(symbol)
+            except Exception as e:
+                return {"available": False, "error": str(e)[:160]}
+
+        def list_smart_money_activity(*, limit: int = 20) -> dict:
+            """Market-wide: which stocks currently have C-suite / political
+            trading activity, ranked by net disclosed dollar flow."""
+            sm = self.smart_money
+            if sm is None:
+                return {"available": False, "reason": "smart_money_disabled"}
+            try:
+                return sm.market_activity(limit=limit)
+            except Exception as e:
+                return {"available": False, "error": str(e)[:160]}
+
         def current_positions() -> list[dict]:
             return [p.__dict__ for p in self.broker.list_positions(self.sub_account)]
 
@@ -962,8 +1013,29 @@ class DayTraderAgent(AgentBase):
                 json_schema={"type": "object", "required": ["symbol"], "properties": {
                     "symbol": {"type": "string"}}}), fn=get_analyst_view),
             ToolHandler(spec=ToolSpec(
-                name="current_positions", description="List currently held day-trading positions.",
-                json_schema={"type": "object"}), fn=current_positions),
+                name="get_smart_money",
+                description=("Optional edge signal: disclosed INSIDER (C-suite / Form 4 — "
+                              "officers, directors, 10% owners) and POLITICAL (US Senate + "
+                              "House) trading activity for a symbol over the lookback window. "
+                              "Returns an overall_bias plus per-category net disclosed dollar "
+                              "flow (buys minus sells), a bullish/bearish read, and the notable "
+                              "people involved. Use it as a conviction tilt — a fresh cluster "
+                              "of insider/political BUYS supports a long; heavy insider SELLING "
+                              "is a caution flag. Absent (available:false) when no data key is "
+                              "configured — then just ignore it."),
+                json_schema={"type": "object", "required": ["symbol"], "properties": {
+                    "symbol": {"type": "string"}}}), fn=get_smart_money),
+            ToolHandler(spec=ToolSpec(
+                name="list_smart_money_activity",
+                description=("Market-wide scan of which stocks currently have C-suite / "
+                              "political trading activity, ranked by absolute net disclosed "
+                              "dollar flow. Each entry has the symbol, net_value, bias, "
+                              "has_insider/has_political flags and notable names. Use it to "
+                              "surface names with unusual smart-money interest that the price "
+                              "scanner may not have flagged."),
+                json_schema={"type": "object", "properties": {
+                    "limit": {"type": "integer", "default": 20}}}), fn=list_smart_money_activity),
+
             ToolHandler(spec=ToolSpec(
                 name="account_snapshot", description="Equity, cash, positions value.",
                 json_schema={"type": "object"}), fn=account_snapshot),

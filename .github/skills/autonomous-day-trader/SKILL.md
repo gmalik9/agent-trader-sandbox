@@ -83,6 +83,12 @@ control back to the standalone scheduler agent when no Copilot session is open.
 1. Verify secrets exist and keys are wired (see
    [architecture-and-setup.md](./references/architecture-and-setup.md) for the
    full env-var table and the news/Alpaca API keys the skill is allowed to use).
+   In particular, `COPILOT_SKILLS_ALPACA_API_KEY_ID` /
+   `COPILOT_SKILLS_ALPACA_SECRET_KEY` must be set in
+   `.streamlit/secrets.toml` — these bind the skill to its **dedicated paper
+   account `PA3WWRZG806F`** (separate from the scheduler agent's account). Every
+   skill script hard-aborts unless the connected `account_number` matches, so it
+   can never trade the wrong book.
 2. Start the stack: `./trader start` (or `./trader rebuild` after code changes —
    **`restart` does NOT reload code**; the image bakes `app.py`/`src/`).
 3. **Enter Copilot-driven mode** so the standalone scheduler agent stands down
@@ -137,6 +143,19 @@ docker compose exec -T scheduler python \
 
 **d. Journal** the observation/action (see "Journal"). Then repeat next minute.
 
+**e. Report (every phase).** Render the per-phase status tables so the book and
+what just happened are always visible:
+
+```bash
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/status_table.py --activity 8
+```
+
+This prints a **Holdings** table (symbol, side, qty, avg, mark, P&L, stop,
+%-to-stop, %-equity, theme) and a **Recent activity** table (last N journal
+entries). Always show both tables at the start (post-gather) and end (post-act)
+of each pass.
+
 If nothing qualifies, do nothing — journal a brief `observation` and move on.
 
 ### 2. Trade discipline (always)
@@ -154,6 +173,36 @@ mirrors the engine's enforced rules:
 tick — just with Copilot as the brain instead of an API call. It still rejects a
 trade that breaks a cap (returns `rejected` with a reason). See
 [trading-rules.md](./references/trading-rules.md) for the full command reference.
+
+### 2b. Smart-money edge (insider C-suite + political) — optional
+
+When an `FMP_API_KEY` (recommended — covers both) or `FINNHUB_API_KEY` (insider
+only) is configured, each idea in `gather_context.py` carries a `smart_money`
+block (overall/insider/political bias + net disclosed $ flow) and the dump
+includes a market-wide `smart_money_activity` ranking. Use it as a **conviction
+tilt only** — a fresh cluster of insider/political **buys** supports a long,
+heavy insider **selling** is a caution flag — never as a standalone trigger; the
+news + analyst + technical gate still applies. On demand:
+
+```bash
+# stocks with unusual insider/political activity right now
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/smart_money_report.py --market
+
+# deep-dive one symbol
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/smart_money_report.py --symbol NVDA
+
+# approximate a person's net positions across stocks + sectors
+docker compose exec -T scheduler python \
+  .github/skills/autonomous-day-trader/scripts/smart_money_report.py --person "Pelosi"
+```
+
+Positions are reconstructed from disclosed **transactions** over the lookback
+(insiders/politicians don't publish real-time holdings), so treat them as
+"recent net activity", not a brokerage statement. No key ⇒ the block is simply
+absent and nothing breaks.
+
 
 ### 3. Journal (continuously — this is the "self-learning")
 
@@ -205,6 +254,14 @@ human over time."
 
 - **Paper only.** Never add a live-broker path. Alpaca stays paper
   (`ALPACA_PAPER=true`, account starts with `PA`).
+- **Dedicated account.** The skill trades only account **`PA3WWRZG806F`** via
+  `COPILOT_SKILLS_ALPACA_*` (an override applied inside each skill process, so
+  the scheduler agent's account is untouched). `_trader.py` asserts the
+  connected `account_number` equals `PA3WWRZG806F` and aborts otherwise.
+- **Dedicated sub-account namespace.** The skill uses
+  `COPILOT_SKILLS_SUB_ACCOUNT=copilot_skills` (inside `_trader.py`) so its
+  DB stop plans / runs are isolated from the standalone scheduler agent's
+  `day` namespace. This prevents cross-pruning of active stop plans.
 - **Read-only DB inspection.** `data/sandbox.sqlite` is WAL-mode and the
   scheduler writes to it constantly. Inspect with a **read-only** connection
   (`file:...?mode=ro`) or the snapshot script. Never run concurrent writers — it
@@ -237,5 +294,8 @@ human over time."
   today's decisions + P&L + throttle state (read-only).
 - [journal_append.py](./scripts/journal_append.py) — append a structured entry
   to `data/trader_journal.jsonl`.
+- [status_table.py](./scripts/status_table.py) — **per-phase report**: markdown
+  **Holdings** table (P&L, stop, distance-to-stop, %-equity, theme) + **Recent
+  activity** table (last N journal entries). Show it every pass (read-only).
 - [end_of_day_review.py](./scripts/end_of_day_review.py) — aggregate the day and
   write a `session_close` review.

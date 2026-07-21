@@ -66,16 +66,35 @@ never print or commit them.
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | if that provider | removes the free-tier caps — the durable fix for throttling |
 | `BROKER_BACKEND` | always (default `dual`) | `sandbox` \| `alpaca_paper` \| `dual` |
 | `ALPACA_API_KEY_ID` / `ALPACA_SECRET_KEY` | broker ∈ {alpaca_paper, dual} | Alpaca **paper** creds |
+| `COPILOT_SKILLS_ALPACA_API_KEY_ID` / `COPILOT_SKILLS_ALPACA_SECRET_KEY` | this skill | Paper creds for the skill's **dedicated** account `PA3WWRZG806F` (overrides `ALPACA_*` inside skill scripts only; agent untouched) |
+| `COPILOT_SKILLS_ALPACA_ACCOUNT` | optional (default `PA3WWRZG806F`) | Account number the skill asserts before trading; hard-abort on mismatch |
 | `ALPACA_PAPER` | same; **must be `true`** | safety assertion (paper only) |
 | `STOCK_REC_MCP_TRADING_ENABLED` | same; must be `true` | unlocks upstream write tools |
 | `SHORT_TERM_TRADER_PATH` | always | path to short-term-trader repo (in-container `/sibling/...`) |
 | `STOCK_RECOMMENDER_PATH` | always | path to stock-recommender repo |
-| `FINNHUB_API_KEY` | optional | news / earnings; passed to MCP subprocesses |
+| `FINNHUB_API_KEY` | optional | news / earnings; passed to MCP subprocesses; also insider-only smart-money fallback |
 | `ALPHAVANTAGE_API_KEY` | optional | news; passed to MCP subprocesses |
+| `FMP_API_KEY` | optional | Financial Modeling Prep — enables smart-money (insider C-suite + political/Congress) activity signals; covers both categories |
+| `SMART_MONEY_ENABLED` | optional (default `true`) | expose the insider/political tools + context block |
+| `SMART_MONEY_LOOKBACK_DAYS` | optional (default `90`) | window for aggregating disclosures |
 | `SCAN_UNIVERSE` | optional (default `sp500`) | `liquid` \| `sp500` \| `all` |
 | `DAY_AUTOPILOT` | optional (default `true`) | `false` = Copilot-driven (no scheduler LLM/PAT calls); live `day_autopilot` setting overrides |
 | `DAY_COMPACT_MODE` | optional (default `false`) | default for compact requests (live `compact_prompt` setting overrides) |
 | `CAPITAL_TOTAL` / `SPLIT_DAY_PCT` | optional | bankroll + day/long split |
+
+## The skill's dedicated paper account (`PA3WWRZG806F`)
+
+The autonomous-day-trader skill trades a **separate** Alpaca paper account from
+the scheduler agent so the two never share a book. It reads
+`COPILOT_SKILLS_ALPACA_API_KEY_ID` / `COPILOT_SKILLS_ALPACA_SECRET_KEY` from
+`secrets.toml` and, inside each skill script's own process, overrides
+`ALPACA_API_KEY_ID` / `ALPACA_SECRET_KEY` before the broker MCP subprocess is
+spawned. Because every skill command runs as its own `docker compose exec`
+process, this override is invisible to the long-running scheduler agent (which
+keeps its own env and account). `scripts/_trader.py` then calls `get_account()`
+and **hard-aborts** unless `account_number == PA3WWRZG806F` (override via
+`COPILOT_SKILLS_ALPACA_ACCOUNT`) — a mis-keyed credential can never place an
+order on the wrong account. No agent code is modified to achieve this.
 
 ## Copilot-driven vs scheduler-autopilot (`day_autopilot`)
 
