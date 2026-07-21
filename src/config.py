@@ -130,6 +130,10 @@ class Settings(BaseSettings):
     fmp_api_key: str = ""
     smart_money_enabled: bool = True     # expose the insider/political tools
     smart_money_lookback_days: int = 90  # window for aggregating disclosures
+    # FMP's free plan only serves the market-wide "latest" feeds (per-symbol
+    # search is paywalled), so per-symbol activity is filtered from these feeds.
+    # This caps how many 100-row pages of each feed to pull per refresh.
+    smart_money_max_pages: int = 6
 
     # Sandbox engine knobs
     slippage_bps: float = 2.0

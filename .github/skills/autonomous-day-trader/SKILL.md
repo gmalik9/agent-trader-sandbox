@@ -203,6 +203,13 @@ Positions are reconstructed from disclosed **transactions** over the lookback
 "recent net activity", not a brokerage statement. No key ⇒ the block is simply
 absent and nothing breaks.
 
+> **FMP free-tier note:** FMP retired the per-symbol *search* endpoints (they
+> now return HTTP 402). The client uses the open market-wide *latest* feeds and
+> filters by symbol locally, so `--symbol` only sees a name if it appears in the
+> recent feed window (`SMART_MONEY_MAX_PAGES` × 100 rows). `--market` and
+> `--person` work fully. Upgrade the FMP plan to restore direct per-symbol
+> lookups.
+
 
 ### 3. Journal (continuously — this is the "self-learning")
 

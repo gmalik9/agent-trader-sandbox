@@ -13,9 +13,13 @@ Providers are auto-selected by which API key is present:
 
   * **Financial Modeling Prep (FMP)** — covers BOTH insider and political with a
     single key. *Recommended.* Set ``FMP_API_KEY`` (https://financialmodelingprep.com).
+    Uses the current ``/stable/`` API. NOTE: on the free plan the per-symbol
+    *search* endpoints are paywalled (HTTP 402); the market-wide *latest* feeds
+    are open, so this client pulls the latest insider/senate/house feeds within
+    the lookback window and filters/aggregates by symbol locally.
   * **Finnhub** — insider transactions only (its congressional endpoint is a
     premium add-on). Reuses the ``FINNHUB_API_KEY`` already used by the
-    news/scan legs.
+    news/scan legs; supports true per-symbol lookups.
 
 If no key is configured the client degrades gracefully: every method returns a
 structured ``{"available": False, ...}`` payload rather than raising, so the
@@ -33,14 +37,17 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 log = logging.getLogger("smart_money")
 
-_FMP_BASE = "https://financialmodelingprep.com/api"
+_STABLE = "https://financialmodelingprep.com/stable"
 _FINNHUB_BASE = "https://finnhub.io/api/v1"
+_PAGE_SIZE = 100
+# The congressional feeds cap 'limit' at 25 on the FMP free tier (larger -> 402).
+_POL_PAGE_SIZE = 25
 
 # Words in an FMP/Finnhub transaction-type string that denote an acquisition vs
 # a disposition. Form 4 uses single-letter codes (P=purchase, S=sale, A=grant,
@@ -82,6 +89,65 @@ def _parse_day(v: Any) -> datetime | None:
         return None
 
 
+def _amount_midpoint(amount_range: str) -> float:
+    """Congressional disclosures report a $ RANGE (e.g. '$1,001 - $15,000').
+
+    Approximate the trade size as the midpoint of the range for aggregation.
+    """
+    s = (amount_range or "").replace("$", "").replace(",", "")
+    nums = []
+    for tok in s.replace("-", " ").split():
+        try:
+            nums.append(float(tok))
+        except ValueError:
+            continue
+    if not nums:
+        return 0.0
+    if len(nums) == 1:
+        return nums[0]
+    return round((min(nums) + max(nums)) / 2.0, 2)
+
+
+def _clean_symbol(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    return "" if s in ("", "NONE", "NULL", "N/A") else s
+
+
+def _norm_insider(r: dict) -> dict:
+    shares = _to_float(r.get("securitiesTransacted"))
+    price = _to_float(r.get("price"))
+    return {
+        "source": "insider",
+        "symbol": _clean_symbol(r.get("symbol")),
+        "person": r.get("reportingName") or r.get("typeOfOwner") or "insider",
+        "role": r.get("typeOfOwner") or "",
+        "side": _classify_side(r.get("transactionType") or r.get("acquisitionOrDisposition") or ""),
+        "shares": shares,
+        "value": round(shares * price, 2) if price else 0.0,
+        "date": r.get("transactionDate") or r.get("filingDate"),
+    }
+
+
+def _norm_political(r: dict, chamber: str) -> dict:
+    amount = str(r.get("amount") or "")
+    first = str(r.get("firstName") or "").strip()
+    last = str(r.get("lastName") or "").strip()
+    person = (f"{first} {last}".strip()) or r.get("office") or r.get("representative") or "member"
+    return {
+        "source": "political",
+        "chamber": chamber,
+        "symbol": _clean_symbol(r.get("symbol") or r.get("ticker")),
+        "person": person,
+        "role": chamber,
+        "side": _classify_side(r.get("type") or r.get("transactionType") or ""),
+        "amount_range": amount.strip() or None,
+        "value": _amount_midpoint(amount),
+        # Congress discloses late, so the DISCLOSURE date (when the market
+        # learns) is the actionable timestamp — use it for the lookback window.
+        "date": r.get("disclosureDate") or r.get("transactionDate"),
+    }
+
+
 class SmartMoneyClient:
     """Fetch + summarize insider and political trading activity.
 
@@ -94,16 +160,20 @@ class SmartMoneyClient:
         fmp_api_key: str = "",
         finnhub_api_key: str = "",
         lookback_days: int = 90,
+        max_pages: int = 6,
         timeout: float = 12.0,
         client: httpx.Client | None = None,
     ) -> None:
         self.fmp_key = (fmp_api_key or "").strip()
         self.finnhub_key = (finnhub_api_key or "").strip()
         self.lookback_days = max(1, int(lookback_days))
+        self.max_pages = max(1, int(max_pages))
         self._timeout = float(timeout)
         self._client = client
         self._owns_client = client is None
         self._sector_cache: dict[str, str] = {}
+        self._insider_cache: list[dict] | None = None
+        self._political_cache: list[dict] | None = None
 
     # -- lifecycle -----------------------------------------------------------
     @property
@@ -132,8 +202,8 @@ class SmartMoneyClient:
     def _get_json(self, url: str, params: dict[str, Any]) -> Any:
         try:
             resp = self._http.get(url, params=params)
-            if resp.status_code == 403:
-                log.debug("smart_money: 403 (plan/key) for %s", url)
+            if resp.status_code in (401, 402, 403):
+                log.debug("smart_money: %s (plan/key) for %s", resp.status_code, url)
                 return None
             resp.raise_for_status()
             return resp.json()
@@ -141,29 +211,61 @@ class SmartMoneyClient:
             log.debug("smart_money: request failed for %s", url, exc_info=True)
             return None
 
-    # -- normalized fetchers -------------------------------------------------
-    def _fmp_insider(self, symbol: str | None, *, page: int = 0) -> list[dict]:
+    def _fmp_get(self, path: str, params: dict[str, Any]) -> Any:
+        p = dict(params)
+        p["apikey"] = self.fmp_key
+        return self._get_json(f"{_STABLE}/{path}", p)
+
+    def _paginate_latest(self, path: str, normalize: Callable[[dict], dict],
+                         extra: dict[str, Any] | None = None,
+                         page_size: int = _PAGE_SIZE) -> list[dict]:
+        """Page through a market-wide '/latest' feed until the lookback cutoff.
+
+        ``page_size`` differs per feed: insider allows 100 rows/page but the
+        congressional feeds cap ``limit`` at 25 on the FMP free tier (a larger
+        value returns HTTP 402).
+        """
         if not self.fmp_key:
             return []
-        params: dict[str, Any] = {"page": page, "apikey": self.fmp_key}
-        if symbol:
-            params["symbol"] = symbol.upper()
-        rows = self._get_json(f"{_FMP_BASE}/v4/insider-trading", params) or []
-        out: list[dict] = []
-        for r in rows if isinstance(rows, list) else []:
-            shares = _to_float(r.get("securitiesTransacted"))
-            price = _to_float(r.get("price"))
-            out.append({
-                "source": "insider",
-                "symbol": str(r.get("symbol", "")).upper(),
-                "person": r.get("reportingName") or r.get("typeOfOwner") or "insider",
-                "role": r.get("typeOfOwner") or "",
-                "side": _classify_side(r.get("transactionType") or r.get("acquistionOrDisposition") or ""),
-                "shares": shares,
-                "value": round(shares * price, 2) if price else 0.0,
-                "date": r.get("transactionDate") or r.get("filingDate"),
-            })
-        return out
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.lookback_days)
+        rows: list[dict] = []
+        for page in range(self.max_pages):
+            params: dict[str, Any] = {"page": page, "limit": page_size}
+            if extra:
+                params.update(extra)
+            data = self._fmp_get(path, params)
+            if not isinstance(data, list) or not data:
+                break
+            kept_this_page = 0
+            for r in data:
+                nr = normalize(r)
+                d = _parse_day(nr.get("date"))
+                if d is not None and d < cutoff:
+                    continue
+                rows.append(nr)
+                kept_this_page += 1
+            # Feeds aren't always strictly date-sorted (disclosure lag), so only
+            # stop once an ENTIRE page falls outside the window, or it's short.
+            if kept_this_page == 0 or len(data) < page_size:
+                break
+        return rows
+
+    # -- cached market-wide feeds -------------------------------------------
+    def _all_insider(self) -> list[dict]:
+        if self._insider_cache is None:
+            self._insider_cache = self._paginate_latest(
+                "insider-trading/latest", _norm_insider)
+        return self._insider_cache
+
+    def _all_political(self) -> list[dict]:
+        if self._political_cache is None:
+            rows: list[dict] = []
+            rows += self._paginate_latest(
+                "senate-latest", lambda r: _norm_political(r, "senate"), page_size=_POL_PAGE_SIZE)
+            rows += self._paginate_latest(
+                "house-latest", lambda r: _norm_political(r, "house"), page_size=_POL_PAGE_SIZE)
+            self._political_cache = rows
+        return self._political_cache
 
     def _finnhub_insider(self, symbol: str) -> list[dict]:
         if not self.finnhub_key or not symbol:
@@ -189,38 +291,7 @@ class SmartMoneyClient:
                 "value": round(abs(shares) * price, 2) if price else 0.0,
                 "date": r.get("transactionDate") or r.get("filingDate"),
             })
-        return out
-
-    def _fmp_political(self, symbol: str | None) -> list[dict]:
-        """Senate + House disclosures (per-symbol, or latest market-wide)."""
-        if not self.fmp_key:
-            return []
-        out: list[dict] = []
-        if symbol:
-            senate = self._get_json(f"{_FMP_BASE}/v4/senate-trading",
-                                    {"symbol": symbol.upper(), "apikey": self.fmp_key}) or []
-            house = self._get_json(f"{_FMP_BASE}/v4/senate-disclosure",
-                                   {"symbol": symbol.upper(), "apikey": self.fmp_key}) or []
-        else:
-            senate = self._get_json(f"{_FMP_BASE}/v4/senate-trading-rss-feed",
-                                    {"page": 0, "apikey": self.fmp_key}) or []
-            house = self._get_json(f"{_FMP_BASE}/v4/senate-disclosure-rss-feed",
-                                   {"page": 0, "apikey": self.fmp_key}) or []
-        for chamber, rows in (("senate", senate), ("house", house)):
-            for r in rows if isinstance(rows, list) else []:
-                amount = str(r.get("amount") or "")
-                out.append({
-                    "source": "political",
-                    "chamber": chamber,
-                    "symbol": str(r.get("symbol") or r.get("ticker") or "").upper(),
-                    "person": r.get("representative") or r.get("office") or r.get("firstName", "") + " " + r.get("lastName", "") or "member",
-                    "role": chamber,
-                    "side": _classify_side(r.get("type") or r.get("transactionType") or ""),
-                    "amount_range": amount.strip() or None,
-                    "value": _amount_midpoint(amount),
-                    "date": r.get("transactionDate") or r.get("dateRecieved") or r.get("disclosureDate"),
-                })
-        return out
+        return self._within_lookback(out)
 
     # -- aggregation helpers -------------------------------------------------
     def _within_lookback(self, rows: list[dict]) -> list[dict]:
@@ -263,18 +334,21 @@ class SmartMoneyClient:
         """Combined insider + political activity summary for one symbol.
 
         Returns a compact dict with per-category bias (bullish/bearish),
-        net disclosed dollar flow, and the notable people involved.
+        net disclosed dollar flow, and the notable people involved. On the FMP
+        free tier this is filtered from the recent market-wide feeds, so a
+        thinly-traded symbol may legitimately show no recent activity.
         """
         sym = (symbol or "").upper()
         if not self.available:
             return {"available": False, "symbol": sym, "reason": "no_api_key"}
-        insider_rows = self._fmp_insider(sym) if self.fmp_key else self._finnhub_insider(sym)
-        insider_rows = self._within_lookback(insider_rows)
-        political_rows = self._within_lookback(self._fmp_political(sym)) if self.political_available else []
+        if self.fmp_key:
+            insider_rows = [r for r in self._all_insider() if r["symbol"] == sym]
+        else:
+            insider_rows = self._finnhub_insider(sym)
+        political_rows = [r for r in self._all_political() if r["symbol"] == sym] if self.political_available else []
         ins = self._summarize_side(insider_rows)
         pol = self._summarize_side(political_rows)
 
-        # Overall smart-money bias = sign of combined net disclosed flow.
         combined_net = ins["net_value"] + pol["net_value"]
         if ins["bias"] == "neutral" and pol["bias"] == "neutral":
             overall = "none"
@@ -301,9 +375,9 @@ class SmartMoneyClient:
         """
         if not self.available:
             return {"available": False, "reason": "no_api_key", "symbols": []}
-        rows = self._within_lookback(self._fmp_insider(None)) if self.fmp_key else []
+        rows = list(self._all_insider()) if self.fmp_key else []
         if self.political_available:
-            rows += self._within_lookback(self._fmp_political(None))
+            rows += self._all_political()
         by_sym: dict[str, list[dict]] = defaultdict(list)
         for r in rows:
             if r.get("symbol"):
@@ -341,9 +415,9 @@ class SmartMoneyClient:
         needle = (name or "").strip().lower()
         if not needle:
             return {"available": True, "positions": [], "reason": "empty_name"}
-        rows = self._within_lookback(self._fmp_insider(None)) if self.fmp_key else []
+        rows = list(self._all_insider()) if self.fmp_key else []
         if self.political_available:
-            rows += self._within_lookback(self._fmp_political(None))
+            rows += self._all_political()
         mine = [r for r in rows if needle in str(r.get("person") or "").lower()]
         by_sym: dict[str, dict] = {}
         by_sector: dict[str, float] = defaultdict(float)
@@ -380,27 +454,8 @@ class SmartMoneyClient:
             return self._sector_cache[sym]
         sector = "Unknown"
         if self.fmp_key:
-            data = self._get_json(f"{_FMP_BASE}/v3/profile/{sym}", {"apikey": self.fmp_key})
+            data = self._fmp_get("profile", {"symbol": sym})
             if isinstance(data, list) and data:
                 sector = str(data[0].get("sector") or "Unknown") or "Unknown"
         self._sector_cache[sym] = sector
         return sector
-
-
-def _amount_midpoint(amount_range: str) -> float:
-    """Congressional disclosures report a $ RANGE (e.g. '$1,001 - $15,000').
-
-    Approximate the trade size as the midpoint of the range for aggregation.
-    """
-    s = (amount_range or "").replace("$", "").replace(",", "")
-    nums = []
-    for tok in s.replace("-", " ").split():
-        try:
-            nums.append(float(tok))
-        except ValueError:
-            continue
-    if not nums:
-        return 0.0
-    if len(nums) == 1:
-        return nums[0]
-    return round((min(nums) + max(nums)) / 2.0, 2)

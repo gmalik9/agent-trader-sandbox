@@ -1,6 +1,7 @@
 """Tests for the smart-money (insider + political) activity client.
 
-These use a stub httpx.Client so no network calls are made.
+These use a stub httpx.Client so no network calls are made. The client uses the
+FMP /stable/ market-wide "latest" feeds and filters by symbol locally.
 """
 
 from __future__ import annotations
@@ -22,7 +23,10 @@ class _StubResponse:
 
 
 class _StubHttp:
-    """Routes GET calls to canned payloads keyed by a substring of the URL."""
+    """Routes GET calls to canned payloads keyed by a substring of the URL.
+
+    Returns the payload only for page 0 (page param) so pagination terminates.
+    """
 
     def __init__(self, routes: dict[str, object]):
         self.routes = routes
@@ -30,12 +34,13 @@ class _StubHttp:
 
     def get(self, url, params=None):
         self.calls.append(url)
+        page = int((params or {}).get("page", 0) or 0)
         for frag, payload in self.routes.items():
             if frag in url:
                 if isinstance(payload, tuple):
                     body, code = payload
-                    return _StubResponse(body, code)
-                return _StubResponse(payload)
+                    return _StubResponse(body if page == 0 else [], code)
+                return _StubResponse(payload if page == 0 else [])
         return _StubResponse([], 200)
 
     def close(self):
@@ -66,19 +71,21 @@ def test_no_key_degrades_gracefully():
 
 def test_symbol_activity_combines_insider_and_political():
     http = _StubHttp({
-        "v4/insider-trading": [
+        "insider-trading/latest": [
             {"symbol": "NVDA", "reportingName": "CEO Jane", "typeOfOwner": "officer",
              "transactionType": "P-Purchase", "securitiesTransacted": "1000", "price": "100",
              "transactionDate": "2025-01-10"},
             {"symbol": "NVDA", "reportingName": "CFO Bob", "typeOfOwner": "officer",
              "transactionType": "S-Sale", "securitiesTransacted": "200", "price": "100",
              "transactionDate": "2025-01-11"},
+            {"symbol": "OTHER", "reportingName": "x", "transactionType": "P-Purchase",
+             "securitiesTransacted": "5", "price": "5", "transactionDate": "2025-01-10"},
         ],
-        "v4/senate-trading": [
-            {"symbol": "NVDA", "representative": "Sen. Smith", "type": "Purchase",
+        "senate-latest": [
+            {"symbol": "NVDA", "firstName": "Jane", "lastName": "Smith", "type": "Purchase",
              "amount": "$15,001 - $50,000", "transactionDate": "2025-01-09"},
         ],
-        "v4/senate-disclosure": [],
+        "house-latest": [],
     })
     sm = SmartMoneyClient(fmp_api_key="k", lookback_days=100000, client=http)
     out = sm.symbol_activity("NVDA")
@@ -86,7 +93,6 @@ def test_symbol_activity_combines_insider_and_political():
     # insider: 1000*100 buy - 200*100 sell = +80,000 net -> bullish
     assert out["insider"]["net_value"] == 80000.0
     assert out["insider"]["bias"] == "bullish"
-    # political: one purchase in the 15,001-50,000 range -> positive net
     assert out["political"]["buys"] == 1
     assert out["overall_bias"] == "bullish"
 
@@ -108,26 +114,26 @@ def test_political_absent_without_fmp_key_but_insider_via_finnhub():
 
 def test_market_activity_ranks_by_abs_net_flow():
     http = _StubHttp({
-        "v4/insider-trading": [
+        "insider-trading/latest": [
             {"symbol": "AAA", "reportingName": "x", "transactionType": "P-Purchase",
              "securitiesTransacted": "10", "price": "10", "transactionDate": "2025-01-10"},
             {"symbol": "BBB", "reportingName": "y", "transactionType": "S-Sale",
              "securitiesTransacted": "100", "price": "10", "transactionDate": "2025-01-10"},
         ],
-        "senate-trading-rss-feed": [],
-        "senate-disclosure-rss-feed": [],
+        "senate-latest": [],
+        "house-latest": [],
     })
     sm = SmartMoneyClient(fmp_api_key="k", lookback_days=100000, client=http)
     out = sm.market_activity(limit=5)
     assert out["available"] is True
     syms = [s["symbol"] for s in out["symbols"]]
-    # BBB has |−1000| > AAA |100| so it ranks first
+    # BBB has |-1000| > AAA |100| so it ranks first
     assert syms[0] == "BBB"
 
 
 def test_person_positions_aggregates_by_symbol():
     http = _StubHttp({
-        "v4/insider-trading": [
+        "insider-trading/latest": [
             {"symbol": "AAA", "reportingName": "Jane Doe", "transactionType": "P-Purchase",
              "securitiesTransacted": "10", "price": "10", "transactionDate": "2025-01-10"},
             {"symbol": "AAA", "reportingName": "Jane Doe", "transactionType": "S-Sale",
@@ -135,9 +141,9 @@ def test_person_positions_aggregates_by_symbol():
             {"symbol": "ZZZ", "reportingName": "Someone Else", "transactionType": "P-Purchase",
              "securitiesTransacted": "5", "price": "10", "transactionDate": "2025-01-10"},
         ],
-        "senate-trading-rss-feed": [],
-        "senate-disclosure-rss-feed": [],
-        "v3/profile/AAA": [{"sector": "Technology"}],
+        "senate-latest": [],
+        "house-latest": [],
+        "profile": [{"sector": "Technology"}],
     })
     sm = SmartMoneyClient(fmp_api_key="k", lookback_days=100000, client=http)
     out = sm.person_positions("jane doe")
@@ -146,3 +152,17 @@ def test_person_positions_aggregates_by_symbol():
     # 10*10 buy - 3*10 sell = +70 net
     assert out["positions"][0]["net_value"] == 70.0
     assert out["by_sector"][0]["sector"] == "Technology"
+
+
+def test_lookback_filters_old_rows():
+    http = _StubHttp({
+        "insider-trading/latest": [
+            {"symbol": "AAA", "reportingName": "x", "transactionType": "P-Purchase",
+             "securitiesTransacted": "10", "price": "10", "transactionDate": "2000-01-01"},
+        ],
+        "senate-latest": [],
+        "house-latest": [],
+    })
+    sm = SmartMoneyClient(fmp_api_key="k", lookback_days=30, client=http)
+    out = sm.market_activity()
+    assert out["symbols"] == []  # the only row is far older than the lookback

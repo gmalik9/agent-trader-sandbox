@@ -40,6 +40,7 @@ def _client():
         fmp_api_key=getattr(s, "fmp_api_key", "") or "",
         finnhub_api_key=getattr(s, "finnhub_api_key", "") or "",
         lookback_days=int(getattr(s, "smart_money_lookback_days", 90) or 90),
+        max_pages=int(getattr(s, "smart_money_max_pages", 6) or 6),
     )
 
 

@@ -74,9 +74,10 @@ never print or commit them.
 | `STOCK_RECOMMENDER_PATH` | always | path to stock-recommender repo |
 | `FINNHUB_API_KEY` | optional | news / earnings; passed to MCP subprocesses; also insider-only smart-money fallback |
 | `ALPHAVANTAGE_API_KEY` | optional | news; passed to MCP subprocesses |
-| `FMP_API_KEY` | optional | Financial Modeling Prep — enables smart-money (insider C-suite + political/Congress) activity signals; covers both categories |
+| `FMP_API_KEY` | optional | Financial Modeling Prep — enables smart-money (insider C-suite + political/Congress) activity signals; covers both categories. Free tier: market-wide feeds only (per-symbol search is paywalled) |
 | `SMART_MONEY_ENABLED` | optional (default `true`) | expose the insider/political tools + context block |
 | `SMART_MONEY_LOOKBACK_DAYS` | optional (default `90`) | window for aggregating disclosures |
+| `SMART_MONEY_MAX_PAGES` | optional (default `6`) | 100-row pages of each latest feed to pull (free-tier symbol coverage) |
 | `SCAN_UNIVERSE` | optional (default `sp500`) | `liquid` \| `sp500` \| `all` |
 | `DAY_AUTOPILOT` | optional (default `true`) | `false` = Copilot-driven (no scheduler LLM/PAT calls); live `day_autopilot` setting overrides |
 | `DAY_COMPACT_MODE` | optional (default `false`) | default for compact requests (live `compact_prompt` setting overrides) |
